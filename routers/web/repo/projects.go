@@ -61,11 +61,11 @@ func Projects(ctx *context.Context) {
 	isShowClosed := strings.ToLower(ctx.FormTrim("state")) == "closed"
 	keyword := ctx.FormTrim("q")
 	repo := ctx.Repo.Repository
-	page := ctx.FormInt("page")
+	page := max(ctx.FormInt("page"), 1)
 	ownerID := repo.OwnerID
-	if page <= 1 {
-		page = 1
-	}
+
+	ctx.Data["OpenCount"] = repo.NumOpenProjects
+	ctx.Data["ClosedCount"] = repo.NumClosedProjects
 
 	var total int
 	if !isShowClosed {
@@ -81,7 +81,6 @@ func Projects(ctx *context.Context) {
 			PageSize: setting.UI.IssuePagingNum,
 			Page:     page,
 		},
-		RepoID:   repo.ID,
 		IsClosed: optional.Some(isShowClosed),
 		OrderBy:  project_model.GetSearchOrderByBySortType(sortType),
 		Type:     project_model.TypeRepository,
@@ -91,7 +90,6 @@ func Projects(ctx *context.Context) {
 		ctx.ServerError("GetRepoProjects", err)
 		return
 	}
-
 	projects = append(projects, repoProjects...)
 
 	openOrgProjects, openCountForOrgProjects, err := db.FindAndCount[project_model.Project](ctx, project_model.SearchOptions{
