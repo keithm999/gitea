@@ -19,13 +19,14 @@ This fork was created so I could apply some pull requests or changes to Gitea to
 
 Included is:
 
-- [PR #34808](https://github.com/go-gitea/gitea/pull/34808) to show org-level projects in the repo-level projects list
+- [PR #34808](https://github.com/go-gitea/gitea/pull/34808) repo-level projects tab now includes org-level projects in
+  the list
 
 Still to come:
 
-- [ ] Org config option to enabled/disable showing org-level projects
-- [ ] Repo projects tab should optionally show all projects for org-level projects
+- [ ] Repo config option to enabled/disable showing org-level projects (default to show)
 - [ ] Repo projects tab should optionally show all projects for all repos in this org
+- [ ] Org-level projects tab should optionally show all repo-level projects for this organization
 - [ ] Profile projects tab should optionally show all projects that user is assigned to
 
 ## Purpose
