@@ -13,6 +13,21 @@
 
 [繁體中文](./README.zh-tw.md) | [简体中文](./README.zh-cn.md)
 
+## Changes in this Fork
+
+This fork was created so I could apply some pull requests or changes to Gitea to make it work more to my liking.
+
+Included is:
+
+- [PR #34808](https://github.com/go-gitea/gitea/pull/34808) to show org-level projects in the repo-level projects list
+
+Still to come:
+
+- [ ] Org config option to enabled/disable showing org-level projects
+- [ ] Repo projects tab should optionally show all projects for org-level projects
+- [ ] Repo projects tab should optionally show all projects for all repos in this org
+- [ ] Profile projects tab should optionally show all projects that user is assigned to
+
 ## Purpose
 
 The goal of this project is to make the easiest, fastest, and most
