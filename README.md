@@ -22,6 +22,7 @@ Included is:
 - [PR #34808](https://github.com/go-gitea/gitea/pull/34808) repo-level projects tab now includes org-level projects in
   the list
 - Issue assignment to a Project, shows all projects created by the current user
+- The profile page projects tab now includes all projects created by the current user
 
 Still to come:
 
