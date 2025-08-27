@@ -21,6 +21,7 @@ Included is:
 
 - [PR #34808](https://github.com/go-gitea/gitea/pull/34808) repo-level projects tab now includes org-level projects in
   the list
+- Issue assignment to a Project, shows all projects created by the current user
 
 Still to come:
 
@@ -28,6 +29,7 @@ Still to come:
 - [ ] Repo projects tab should optionally show all projects for all repos in this org
 - [ ] Org-level projects tab should optionally show all repo-level projects for this organization
 - [ ] Profile projects tab should optionally show all projects that user is assigned to
+- [ ] Settings to enable/disable what is shown in the issue to project assignment dropdown list
 
 ## Purpose
 

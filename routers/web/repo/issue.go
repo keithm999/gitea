@@ -119,64 +119,97 @@ func MustAllowPulls(ctx *context.Context) {
 func retrieveProjectsInternal(ctx *context.Context, repo *repo_model.Repository) (open, closed []*project_model.Project) {
 	// Distinguish whether the owner of the repository
 	// is an individual or an organization
-	repoOwnerType := project_model.TypeIndividual
-	if repo.Owner.IsOrganization() {
-		repoOwnerType = project_model.TypeOrganization
-	}
+	// repoOwnerType := project_model.TypeIndividual
+	// if repo.Owner.IsOrganization() {
+	// 	repoOwnerType = project_model.TypeOrganization
+	// }
 
-	projectsUnit := repo.MustGetUnit(ctx, unit.TypeProjects)
+	// projectsUnit := repo.MustGetUnit(ctx, unit.TypeProjects)
 
 	var openProjects []*project_model.Project
 	var closedProjects []*project_model.Project
 	var err error
 
-	if projectsUnit.ProjectsConfig().IsProjectsAllowed(repo_model.ProjectsModeRepo) {
-		openProjects, err = db.Find[project_model.Project](ctx, project_model.SearchOptions{
-			ListOptions: db.ListOptionsAll,
-			RepoID:      repo.ID,
-			IsClosed:    optional.Some(false),
-			Type:        project_model.TypeRepository,
-		})
-		if err != nil {
-			ctx.ServerError("GetProjects", err)
-			return nil, nil
-		}
-		closedProjects, err = db.Find[project_model.Project](ctx, project_model.SearchOptions{
-			ListOptions: db.ListOptionsAll,
-			RepoID:      repo.ID,
-			IsClosed:    optional.Some(true),
-			Type:        project_model.TypeRepository,
-		})
-		if err != nil {
-			ctx.ServerError("GetProjects", err)
-			return nil, nil
-		}
+	// Get open Projects for all Repos created by the current user
+	thisRepoProjects, err := db.Find[project_model.Project](ctx, project_model.SearchOptions{
+		ListOptions: db.ListOptionsAll,
+		IsClosed:    optional.Some(false),
+		Type:        project_model.TypeRepository,
+		CreatorID:   ctx.Doer.ID, // Current logged in user
+	})
+	if err != nil {
+		ctx.ServerError("GetProjects", err)
+		return nil, nil
 	}
+	openProjects = append(openProjects, thisRepoProjects...)
 
-	if projectsUnit.ProjectsConfig().IsProjectsAllowed(repo_model.ProjectsModeOwner) {
-		openProjects2, err := db.Find[project_model.Project](ctx, project_model.SearchOptions{
-			ListOptions: db.ListOptionsAll,
-			OwnerID:     repo.OwnerID,
-			IsClosed:    optional.Some(false),
-			Type:        repoOwnerType,
-		})
-		if err != nil {
-			ctx.ServerError("GetProjects", err)
-			return nil, nil
-		}
-		openProjects = append(openProjects, openProjects2...)
-		closedProjects2, err := db.Find[project_model.Project](ctx, project_model.SearchOptions{
-			ListOptions: db.ListOptionsAll,
-			OwnerID:     repo.OwnerID,
-			IsClosed:    optional.Some(true),
-			Type:        repoOwnerType,
-		})
-		if err != nil {
-			ctx.ServerError("GetProjects", err)
-			return nil, nil
-		}
-		closedProjects = append(closedProjects, closedProjects2...)
+	// Get open Projects for all Org-levels created by the current user
+  thisOrgProjects, err := db.Find[project_model.Project](ctx, project_model.SearchOptions{
+		ListOptions: db.ListOptionsAll,
+		IsClosed:    optional.Some(false),
+		Type:        project_model.TypeOrganization,
+		CreatorID:   ctx.Doer.ID, // Current logged in user
+	})
+	if err != nil {
+		ctx.ServerError("GetProjects", err)
+		return nil, nil
 	}
+	openProjects = append(openProjects, thisOrgProjects...)
+
+	// Get open Projects for individuals created by the current user
+  thisIndividualProjects, err := db.Find[project_model.Project](ctx, project_model.SearchOptions{
+		ListOptions: db.ListOptionsAll,
+		IsClosed:    optional.Some(false),
+		Type:        project_model.TypeIndividual,
+		CreatorID:   ctx.Doer.ID, // Current logged in user
+	})
+	if err != nil {
+		ctx.ServerError("GetProjects", err)
+		return nil, nil
+	}
+	openProjects = append(openProjects, thisIndividualProjects...)
+
+	// Get closed Projects for this Repo
+	// Get open Projects for all Repos created by the current user
+	thisRepoClosedProjects, err := db.Find[project_model.Project](ctx, project_model.SearchOptions{
+		ListOptions: db.ListOptionsAll,
+		IsClosed:    optional.Some(true),
+		Type:        project_model.TypeRepository,
+		CreatorID:   ctx.Doer.ID, // Current logged in user
+	})
+	if err != nil {
+		ctx.ServerError("GetProjects", err)
+		return nil, nil
+	}
+	closedProjects = append(closedProjects, thisRepoClosedProjects...)
+
+	// Get open Projects for all Org-levels created by the current user
+  thisOrgClosedProjects, err := db.Find[project_model.Project](ctx, project_model.SearchOptions{
+		ListOptions: db.ListOptionsAll,
+		IsClosed:    optional.Some(true),
+		Type:        project_model.TypeOrganization,
+		CreatorID:   ctx.Doer.ID, // Current logged in user
+	})
+	if err != nil {
+		ctx.ServerError("GetProjects", err)
+		return nil, nil
+	}
+	closedProjects = append(closedProjects, thisOrgClosedProjects...)
+
+	// Get open Projects for individuals created by the current user
+  thisIndividualClosedProjects, err := db.Find[project_model.Project](ctx, project_model.SearchOptions{
+		ListOptions: db.ListOptionsAll,
+		IsClosed:    optional.Some(true),
+		Type:        project_model.TypeIndividual,
+		CreatorID:   ctx.Doer.ID, // Current logged in user
+	})
+	if err != nil {
+		ctx.ServerError("GetProjects", err)
+		return nil, nil
+	}
+	closedProjects = append(closedProjects, thisIndividualClosedProjects...)
+
+
 	return openProjects, closedProjects
 }
 
