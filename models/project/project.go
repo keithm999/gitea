@@ -207,6 +207,7 @@ type SearchOptions struct {
 	db.ListOptions
 	OwnerID  int64
 	RepoID   int64
+	CreatorID int64
 	IsClosed optional.Option[bool]
 	OrderBy  db.SearchOrderBy
 	Type     Type
@@ -227,6 +228,10 @@ func (opts SearchOptions) ToConds() builder.Cond {
 	}
 	if opts.OwnerID > 0 {
 		cond = cond.And(builder.Eq{"owner_id": opts.OwnerID})
+	}
+
+	if opts.CreatorID > 0 {
+		cond = cond.And(builder.Eq{"creator_id": opts.CreatorID})
 	}
 
 	if len(opts.Title) != 0 {
