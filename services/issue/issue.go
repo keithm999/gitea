@@ -15,8 +15,8 @@ import (
 	repo_model "code.gitea.io/gitea/models/repo"
 	system_model "code.gitea.io/gitea/models/system"
 	user_model "code.gitea.io/gitea/models/user"
-	"code.gitea.io/gitea/modules/container"
 	"code.gitea.io/gitea/modules/git"
+	"code.gitea.io/gitea/modules/gitrepo"
 	"code.gitea.io/gitea/modules/log"
 	"code.gitea.io/gitea/modules/storage"
 	notify_service "code.gitea.io/gitea/services/notify"
@@ -130,57 +130,8 @@ func ChangeIssueRef(ctx context.Context, issue *issues_model.Issue, doer *user_m
 	return nil
 }
 
-// UpdateAssignees is a helper function to add or delete one or multiple issue assignee(s)
-// Deleting is done the GitHub way (quote from their api documentation):
-// https://developer.github.com/v3/issues/#edit-an-issue
-// "assignees" (array): Logins for Users to assign to this issue.
-// Pass one or more user logins to replace the set of assignees on this Issue.
-// Send an empty array ([]) to clear all assignees from the Issue.
-func UpdateAssignees(ctx context.Context, issue *issues_model.Issue, oneAssignee string, multipleAssignees []string, doer *user_model.User) (err error) {
-	uniqueAssignees := container.SetOf(multipleAssignees...)
-
-	// Keep the old assignee thingy for compatibility reasons
-	if oneAssignee != "" {
-		uniqueAssignees.Add(oneAssignee)
-	}
-
-	// Loop through all assignees to add them
-	allNewAssignees := make([]*user_model.User, 0, len(uniqueAssignees))
-	for _, assigneeName := range uniqueAssignees.Values() {
-		assignee, err := user_model.GetUserByName(ctx, assigneeName)
-		if err != nil {
-			return err
-		}
-
-		if user_model.IsUserBlockedBy(ctx, doer, assignee.ID) {
-			return user_model.ErrBlockedUser
-		}
-
-		allNewAssignees = append(allNewAssignees, assignee)
-	}
-
-	// Delete all old assignees not passed
-	if err = DeleteNotPassedAssignee(ctx, issue, doer, allNewAssignees); err != nil {
-		return err
-	}
-
-	// Add all new assignees
-	// Update the assignee. The function will check if the user exists, is already
-	// assigned (which he shouldn't as we deleted all assignees before) and
-	// has access to the repo.
-	for _, assignee := range allNewAssignees {
-		// Extra method to prevent double adding (which would result in removing)
-		_, err = AddAssigneeIfNotAssigned(ctx, issue, doer, assignee.ID, true)
-		if err != nil {
-			return err
-		}
-	}
-
-	return err
-}
-
 // DeleteIssue deletes an issue
-func DeleteIssue(ctx context.Context, doer *user_model.User, gitRepo *git.Repository, issue *issues_model.Issue) error {
+func DeleteIssue(ctx context.Context, doer *user_model.User, issue *issues_model.Issue) error {
 	// load issue before deleting it
 	if err := issue.LoadAttributes(ctx); err != nil {
 		return err
@@ -199,8 +150,11 @@ func DeleteIssue(ctx context.Context, doer *user_model.User, gitRepo *git.Reposi
 	}
 
 	// delete pull request related git data
-	if issue.IsPull && gitRepo != nil {
-		if err := gitRepo.RemoveReference(issue.PullRequest.GetGitHeadRefName()); err != nil {
+	if issue.IsPull {
+		if err := issue.PullRequest.LoadBaseRepo(ctx); err != nil {
+			return err
+		}
+		if err := gitrepo.RemoveRef(ctx, issue.PullRequest.BaseRepo, issue.PullRequest.GetGitHeadRefName()); err != nil {
 			return err
 		}
 	}
@@ -208,40 +162,6 @@ func DeleteIssue(ctx context.Context, doer *user_model.User, gitRepo *git.Reposi
 	notify_service.DeleteIssue(ctx, doer, issue)
 
 	return nil
-}
-
-// AddAssigneeIfNotAssigned adds an assignee only if he isn't already assigned to the issue.
-// Also checks for access of assigned user
-func AddAssigneeIfNotAssigned(ctx context.Context, issue *issues_model.Issue, doer *user_model.User, assigneeID int64, notify bool) (comment *issues_model.Comment, err error) {
-	assignee, err := user_model.GetUserByID(ctx, assigneeID)
-	if err != nil {
-		return nil, err
-	}
-
-	// Check if the user is already assigned
-	isAssigned, err := issues_model.IsUserAssignedToIssue(ctx, issue, assignee)
-	if err != nil {
-		return nil, err
-	}
-	if isAssigned {
-		// nothing to to
-		return nil, nil
-	}
-
-	valid, err := access_model.CanBeAssigned(ctx, assignee, issue.Repo, issue.IsPull)
-	if err != nil {
-		return nil, err
-	}
-	if !valid {
-		return nil, repo_model.ErrUserDoesNotHaveAccessToRepo{UserID: assigneeID, RepoName: issue.Repo.Name}
-	}
-
-	if notify {
-		_, comment, err = ToggleAssigneeWithNotify(ctx, issue, doer, assigneeID)
-		return comment, err
-	}
-	_, comment, err = issues_model.ToggleIssueAssignee(ctx, issue, doer, assigneeID)
-	return comment, err
 }
 
 // GetRefEndNamesAndURLs retrieves the ref end names (e.g. refs/heads/branch-name -> branch-name)
@@ -261,74 +181,60 @@ func GetRefEndNamesAndURLs(issues []*issues_model.Issue, repoLink string) (map[i
 
 // deleteIssue deletes the issue
 func deleteIssue(ctx context.Context, issue *issues_model.Issue) ([]string, error) {
-	ctx, committer, err := db.TxContext(ctx)
-	if err != nil {
-		return nil, err
-	}
-	defer committer.Close()
-
-	if _, err := db.GetEngine(ctx).ID(issue.ID).NoAutoCondition().Delete(issue); err != nil {
-		return nil, err
-	}
-
-	// update the total issue numbers
-	if err := repo_model.UpdateRepoIssueNumbers(ctx, issue.RepoID, issue.IsPull, false); err != nil {
-		return nil, err
-	}
-	// if the issue is closed, update the closed issue numbers
-	if issue.IsClosed {
-		if err := repo_model.UpdateRepoIssueNumbers(ctx, issue.RepoID, issue.IsPull, true); err != nil {
+	return db.WithTx2(ctx, func(ctx context.Context) ([]string, error) {
+		if _, err := db.GetEngine(ctx).ID(issue.ID).NoAutoCondition().Delete(issue); err != nil {
 			return nil, err
 		}
-	}
 
-	if err := issues_model.UpdateMilestoneCounters(ctx, issue.MilestoneID); err != nil {
-		return nil, fmt.Errorf("error updating counters for milestone id %d: %w",
-			issue.MilestoneID, err)
-	}
+		if err := issues_model.DecrRepoIssueNumbers(ctx, issue.RepoID, issue.IsPull, true, issue.IsClosed); err != nil {
+			return nil, err
+		}
 
-	if err := activities_model.DeleteIssueActions(ctx, issue.RepoID, issue.ID, issue.Index); err != nil {
-		return nil, err
-	}
+		if err := issues_model.UpdateMilestoneCounters(ctx, issue.MilestoneID); err != nil {
+			return nil, fmt.Errorf("error updating counters for milestone id %d: %w",
+				issue.MilestoneID, err)
+		}
 
-	// find attachments related to this issue and remove them
-	if err := issue.LoadAttachments(ctx); err != nil {
-		return nil, err
-	}
+		if err := activities_model.DeleteIssueActions(ctx, issue.RepoID, issue.ID, issue.Index); err != nil {
+			return nil, err
+		}
 
-	var attachmentPaths []string
-	for i := range issue.Attachments {
-		attachmentPaths = append(attachmentPaths, issue.Attachments[i].RelativePath())
-	}
+		// find attachments related to this issue and remove them
+		if err := issue.LoadAttachments(ctx); err != nil {
+			return nil, err
+		}
 
-	// delete all database data still assigned to this issue
-	if err := db.DeleteBeans(ctx,
-		&issues_model.ContentHistory{IssueID: issue.ID},
-		&issues_model.Comment{IssueID: issue.ID},
-		&issues_model.IssueLabel{IssueID: issue.ID},
-		&issues_model.IssueDependency{IssueID: issue.ID},
-		&issues_model.IssueAssignees{IssueID: issue.ID},
-		&issues_model.IssueUser{IssueID: issue.ID},
-		&activities_model.Notification{IssueID: issue.ID},
-		&issues_model.Reaction{IssueID: issue.ID},
-		&issues_model.IssueWatch{IssueID: issue.ID},
-		&issues_model.Stopwatch{IssueID: issue.ID},
-		&issues_model.TrackedTime{IssueID: issue.ID},
-		&project_model.ProjectIssue{IssueID: issue.ID},
-		&repo_model.Attachment{IssueID: issue.ID},
-		&issues_model.PullRequest{IssueID: issue.ID},
-		&issues_model.Comment{RefIssueID: issue.ID},
-		&issues_model.IssueDependency{DependencyID: issue.ID},
-		&issues_model.Comment{DependentIssueID: issue.ID},
-		&issues_model.IssuePin{IssueID: issue.ID},
-	); err != nil {
-		return nil, err
-	}
+		var attachmentPaths []string
+		for i := range issue.Attachments {
+			attachmentPaths = append(attachmentPaths, issue.Attachments[i].RelativePath())
+		}
 
-	if err := committer.Commit(); err != nil {
-		return nil, err
-	}
-	return attachmentPaths, nil
+		// delete all database data still assigned to this issue
+		if err := db.DeleteBeans(ctx,
+			&issues_model.ContentHistory{IssueID: issue.ID},
+			&issues_model.Comment{IssueID: issue.ID},
+			&issues_model.IssueLabel{IssueID: issue.ID},
+			&issues_model.IssueDependency{IssueID: issue.ID},
+			&issues_model.IssueAssignees{IssueID: issue.ID},
+			&issues_model.IssueUser{IssueID: issue.ID},
+			&activities_model.Notification{IssueID: issue.ID},
+			&issues_model.Reaction{IssueID: issue.ID},
+			&issues_model.IssueWatch{IssueID: issue.ID},
+			&issues_model.Stopwatch{IssueID: issue.ID},
+			&issues_model.TrackedTime{IssueID: issue.ID},
+			&project_model.ProjectIssue{IssueID: issue.ID},
+			&repo_model.Attachment{IssueID: issue.ID},
+			&issues_model.PullRequest{IssueID: issue.ID},
+			&issues_model.Comment{RefIssueID: issue.ID},
+			&issues_model.IssueDependency{DependencyID: issue.ID},
+			&issues_model.Comment{DependentIssueID: issue.ID},
+			&issues_model.IssuePin{IssueID: issue.ID},
+		); err != nil {
+			return nil, err
+		}
+
+		return attachmentPaths, nil
+	})
 }
 
 // DeleteOrphanedIssues delete issues without a repo

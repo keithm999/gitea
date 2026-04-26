@@ -10,17 +10,26 @@ concurrency:
 jobs:
   files-changed:
     uses: ./.github/workflows/files-changed.yml
+    permissions:
+      contents: read
 
   lint-backend:
     if: needs.files-changed.outputs.backend == 'true' || needs.files-changed.outputs.actions == 'true'
     needs: files-changed
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
           check-latest: true
+          cache: false
+      - uses: ./.github/actions/go-cache
+        with:
+          cache-name: lint-backend
+          lint-cache: "true"
       - run: make deps-backend deps-tools
       - run: make lint-backend
         env:
@@ -30,15 +39,18 @@ jobs:
     if: needs.files-changed.outputs.templates == 'true'
     needs: files-changed
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
-      - run: uv python install 3.12
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v8.1.0
+      - run: uv python install 3.14
+      - uses: pnpm/action-setup@v5
+      - uses: actions/setup-node@v6
         with:
           node-version: 24
-          cache: npm
-          cache-dependency-path: package-lock.json
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
       - run: make deps-py
       - run: make deps-frontend
       - run: make lint-templates
@@ -47,24 +59,46 @@ jobs:
     if: needs.files-changed.outputs.yaml == 'true'
     needs: files-changed
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
-      - run: uv python install 3.12
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v8.1.0
+      - run: uv python install 3.14
       - run: make deps-py
       - run: make lint-yaml
+
+  lint-json:
+    if: needs.files-changed.outputs.json == 'true'
+    needs: files-changed
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+      - uses: pnpm/action-setup@v5
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+      - run: make deps-frontend
+      - run: make lint-json
 
   lint-swagger:
     if: needs.files-changed.outputs.swagger == 'true'
     needs: files-changed
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v6
+      - uses: pnpm/action-setup@v5
+      - uses: actions/setup-node@v6
         with:
           node-version: 24
-          cache: npm
-          cache-dependency-path: package-lock.json
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
       - run: make deps-frontend
       - run: make lint-swagger
 
@@ -72,9 +106,11 @@ jobs:
     if: needs.files-changed.outputs.backend == 'true' || needs.files-changed.outputs.frontend == 'true' || needs.files-changed.outputs.actions == 'true' || needs.files-changed.outputs.docs == 'true' || needs.files-changed.outputs.templates == 'true'
     needs: files-changed
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
           check-latest: true
@@ -84,14 +120,21 @@ jobs:
     if: needs.files-changed.outputs.backend == 'true' || needs.files-changed.outputs.actions == 'true'
     needs: files-changed
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
           check-latest: true
+          cache: false
+      - uses: ./.github/actions/go-cache
+        with:
+          cache-name: lint-go-windows
+          lint-cache: "true"
       - run: make deps-backend deps-tools
-      - run: make lint-go-windows lint-go-gitea-vet
+      - run: make lint-go-windows
         env:
           TAGS: bindata sqlite sqlite_unlock_notify
           GOOS: windows
@@ -101,12 +144,19 @@ jobs:
     if: needs.files-changed.outputs.backend == 'true' || needs.files-changed.outputs.actions == 'true'
     needs: files-changed
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
           check-latest: true
+          cache: false
+      - uses: ./.github/actions/go-cache
+        with:
+          cache-name: lint-go-gogit
+          lint-cache: "true"
       - run: make deps-backend deps-tools
       - run: make lint-go
         env:
@@ -116,12 +166,19 @@ jobs:
     if: needs.files-changed.outputs.backend == 'true' || needs.files-changed.outputs.actions == 'true'
     needs: files-changed
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
           check-latest: true
+          cache: false
+      - uses: ./.github/actions/go-cache
+        with:
+          cache-name: checks-backend
+          build-cache: "false"
       - run: make deps-backend deps-tools
       - run: make --always-make checks-backend # ensure the "go-licenses" make target runs
 
@@ -129,13 +186,16 @@ jobs:
     if: needs.files-changed.outputs.frontend == 'true' || needs.files-changed.outputs.actions == 'true'
     needs: files-changed
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v6
+      - uses: pnpm/action-setup@v5
+      - uses: actions/setup-node@v6
         with:
           node-version: 24
-          cache: npm
-          cache-dependency-path: package-lock.json
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
       - run: make deps-frontend
       - run: make lint-frontend
       - run: make checks-frontend
@@ -146,12 +206,18 @@ jobs:
     if: needs.files-changed.outputs.backend == 'true' || needs.files-changed.outputs.actions == 'true'
     needs: files-changed
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
           check-latest: true
+          cache: false
+      - uses: ./.github/actions/go-cache
+        with:
+          cache-name: backend
       # no frontend build here as backend should be able to build
       # even without any frontend files
       - run: make deps-backend
@@ -178,13 +244,16 @@ jobs:
     if: needs.files-changed.outputs.docs == 'true' || needs.files-changed.outputs.actions == 'true'
     needs: files-changed
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v6
+      - uses: pnpm/action-setup@v5
+      - uses: actions/setup-node@v6
         with:
           node-version: 24
-          cache: npm
-          cache-dependency-path: package-lock.json
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
       - run: make deps-frontend
       - run: make lint-md
 
@@ -192,9 +261,11 @@ jobs:
     if: needs.files-changed.outputs.actions == 'true' || needs.files-changed.outputs.actions == 'true'
     needs: files-changed
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
           check-latest: true

@@ -72,7 +72,7 @@ func ToBranch(ctx context.Context, repo *repo_model.Repository, branchName strin
 				return nil, err
 			}
 
-			perms, err := access_model.GetUserRepoPermission(ctx, repo, user)
+			perms, err := access_model.GetIndividualUserRepoPermission(ctx, repo, user)
 			if err != nil {
 				return nil, err
 			}
@@ -105,7 +105,7 @@ func ToBranch(ctx context.Context, repo *repo_model.Repository, branchName strin
 	}
 
 	if user != nil {
-		permission, err := access_model.GetUserRepoPermission(ctx, repo, user)
+		permission, err := access_model.GetIndividualUserRepoPermission(ctx, repo, user)
 		if err != nil {
 			return nil, err
 		}
@@ -139,7 +139,7 @@ func getWhitelistEntities[T *user_model.User | *organization.Team](entities []T,
 
 // ToBranchProtection convert a ProtectedBranch to api.BranchProtection
 func ToBranchProtection(ctx context.Context, bp *git_model.ProtectedBranch, repo *repo_model.Repository) *api.BranchProtection {
-	readers, err := access_model.GetRepoReaders(ctx, repo)
+	readers, err := access_model.GetUsersWithUnitAccess(ctx, repo, perm.AccessModeRead, unit.TypePullRequests)
 	if err != nil {
 		log.Error("GetRepoReaders: %v", err)
 	}
@@ -203,8 +203,8 @@ func ToBranchProtection(ctx context.Context, bp *git_model.ProtectedBranch, repo
 
 // ToTag convert a git.Tag to an api.Tag
 func ToTag(repo *repo_model.Repository, t *git.Tag) *api.Tag {
-	tarballURL := util.URLJoin(repo.HTMLURL(), "archive", t.Name+".tar.gz")
-	zipballURL := util.URLJoin(repo.HTMLURL(), "archive", t.Name+".zip")
+	tarballURL := repo.HTMLURL() + "/archive/" + url.PathEscape(t.Name+".tar.gz")
+	zipballURL := repo.HTMLURL() + "/archive/" + url.PathEscape(t.Name+".zip")
 
 	// Archive URLs are "" if the download feature is disabled
 	if setting.Repository.DisableDownloadSourceArchives {
@@ -247,30 +247,64 @@ func ToActionTask(ctx context.Context, t *actions_model.ActionTask) (*api.Action
 	}, nil
 }
 
-func ToActionWorkflowRun(ctx context.Context, repo *repo_model.Repository, run *actions_model.ActionRun) (*api.ActionWorkflowRun, error) {
-	err := run.LoadAttributes(ctx)
-	if err != nil {
+func ToActionWorkflowRun(ctx context.Context, repo *repo_model.Repository, run *actions_model.ActionRun, attempt *actions_model.ActionRunAttempt) (*api.ActionWorkflowRun, error) {
+	if err := run.LoadAttributes(ctx); err != nil {
 		return nil, err
 	}
+
+	if attempt == nil {
+		if latestAttempt, has, err := run.GetLatestAttempt(ctx); err != nil {
+			return nil, err
+		} else if has {
+			attempt = latestAttempt
+		}
+	}
+
+	runAttempt := int64(0)
 	status, conclusion := ToActionsStatus(run.Status)
+	startedAt := run.Started.AsLocalTime()
+	completedAt := run.Stopped.AsLocalTime()
+	actor := run.TriggerUser       // The username of the user that triggered the initial workflow run.
+	triggerUser := run.TriggerUser // The username of the user that initiated the workflow run. If the workflow run is a re-run, this value may differ from actor.
+
+	// previousAttemptURL is the value of ActionWorkflowRun.PreviousAttemptURL, which is declared as *string without `omitempty` on purpose:
+	// a nil value must still appear in the JSON body as `"previous_attempt_url": null`, matching GitHub's Actions API.
+	var previousAttemptURL *string
+
+	if attempt != nil {
+		if err := attempt.LoadAttributes(ctx); err != nil {
+			return nil, err
+		}
+		runAttempt = attempt.Attempt
+		status, conclusion = ToActionsStatus(attempt.Status)
+		startedAt = attempt.Started.AsLocalTime()
+		completedAt = attempt.Stopped.AsLocalTime()
+		triggerUser = attempt.TriggerUser
+		if attempt.Attempt > 1 {
+			url := fmt.Sprintf("%s/actions/runs/%d/attempts/%d", repo.APIURL(), run.ID, attempt.Attempt-1)
+			previousAttemptURL = &url
+		}
+	}
+
 	return &api.ActionWorkflowRun{
-		ID:           run.ID,
-		URL:          fmt.Sprintf("%s/actions/runs/%d", repo.APIURL(), run.ID),
-		HTMLURL:      run.HTMLURL(),
-		RunNumber:    run.Index,
-		StartedAt:    run.Started.AsLocalTime(),
-		CompletedAt:  run.Stopped.AsLocalTime(),
-		Event:        string(run.Event),
-		DisplayTitle: run.Title,
-		HeadBranch:   git.RefName(run.Ref).BranchName(),
-		HeadSha:      run.CommitSHA,
-		Status:       status,
-		Conclusion:   conclusion,
-		Path:         fmt.Sprintf("%s@%s", run.WorkflowID, run.Ref),
-		Repository:   ToRepo(ctx, repo, access_model.Permission{AccessMode: perm.AccessModeNone}),
-		TriggerActor: ToUser(ctx, run.TriggerUser, nil),
-		// We do not have a way to get a different User for the actor than the trigger user
-		Actor: ToUser(ctx, run.TriggerUser, nil),
+		ID:                 run.ID,
+		URL:                fmt.Sprintf("%s/actions/runs/%d", repo.APIURL(), run.ID),
+		PreviousAttemptURL: previousAttemptURL,
+		HTMLURL:            run.HTMLURL(),
+		RunNumber:          run.Index,
+		RunAttempt:         runAttempt,
+		StartedAt:          startedAt,
+		CompletedAt:        completedAt,
+		Event:              run.TriggerEvent,
+		DisplayTitle:       run.Title,
+		HeadBranch:         git.RefName(run.Ref).BranchName(),
+		HeadSha:            run.CommitSHA,
+		Status:             status,
+		Conclusion:         conclusion,
+		Path:               fmt.Sprintf("%s@%s", run.WorkflowID, run.Ref),
+		Repository:         ToRepo(ctx, repo, access_model.Permission{AccessMode: perm.AccessModeNone}),
+		TriggerActor:       ToUser(ctx, triggerUser, nil),
+		Actor:              ToUser(ctx, actor, nil),
 	}, nil
 }
 
@@ -324,45 +358,42 @@ func ToActionWorkflowJob(ctx context.Context, repo *repo_model.Repository, task 
 		return nil, err
 	}
 
-	jobIndex := 0
-	jobs, err := actions_model.GetRunJobsByRunID(ctx, job.RunID)
-	if err != nil {
-		return nil, err
-	}
-	for i, j := range jobs {
-		if j.ID == job.ID {
-			jobIndex = i
-			break
-		}
-	}
-
 	status, conclusion := ToActionsStatus(job.Status)
 	var runnerID int64
 	var runnerName string
 	var steps []*api.ActionWorkflowStep
 
-	if job.TaskID != 0 {
+	if effectiveTaskID := job.EffectiveTaskID(); effectiveTaskID != 0 {
 		if task == nil {
-			task, _, err = db.GetByID[actions_model.ActionTask](ctx, job.TaskID)
+			task, _, err = db.GetByID[actions_model.ActionTask](ctx, effectiveTaskID)
 			if err != nil {
 				return nil, err
 			}
 		}
 
-		runnerID = task.RunnerID
-		if runner, ok, _ := db.GetByID[actions_model.ActionRunner](ctx, runnerID); ok {
-			runnerName = runner.Name
-		}
-		for i, step := range task.Steps {
-			stepStatus, stepConclusion := ToActionsStatus(job.Status)
-			steps = append(steps, &api.ActionWorkflowStep{
-				Name:        step.Name,
-				Number:      int64(i),
-				Status:      stepStatus,
-				Conclusion:  stepConclusion,
-				StartedAt:   step.Started.AsTime().UTC(),
-				CompletedAt: step.Stopped.AsTime().UTC(),
-			})
+		if task != nil {
+			if task.Steps == nil {
+				task.Steps, err = actions_model.GetTaskStepsByTaskID(ctx, task.ID)
+				if err != nil {
+					return nil, err
+				}
+				task.Steps = util.SliceNilAsEmpty(task.Steps)
+			}
+			runnerID = task.RunnerID
+			if runner, ok, _ := db.GetByID[actions_model.ActionRunner](ctx, runnerID); ok {
+				runnerName = runner.Name
+			}
+			for i, step := range task.Steps {
+				stepStatus, stepConclusion := ToActionsStatus(job.Status)
+				steps = append(steps, &api.ActionWorkflowStep{
+					Name:        step.Name,
+					Number:      int64(i),
+					Status:      stepStatus,
+					Conclusion:  stepConclusion,
+					StartedAt:   step.Started.AsTime().UTC(),
+					CompletedAt: step.Stopped.AsTime().UTC(),
+				})
+			}
 		}
 	}
 
@@ -370,7 +401,7 @@ func ToActionWorkflowJob(ctx context.Context, repo *repo_model.Repository, task 
 		ID: job.ID,
 		// missing api endpoint for this location
 		URL:     fmt.Sprintf("%s/actions/jobs/%d", repo.APIURL(), job.ID),
-		HTMLURL: fmt.Sprintf("%s/jobs/%d", job.Run.HTMLURL(), jobIndex),
+		HTMLURL: fmt.Sprintf("%s/jobs/%d", job.Run.HTMLURL(), job.ID),
 		RunID:   job.RunID,
 		// Missing api endpoint for this location, artifacts are available under a nested url
 		RunURL:      fmt.Sprintf("%s/actions/runs/%d", repo.APIURL(), job.RunID),
@@ -383,21 +414,22 @@ func ToActionWorkflowJob(ctx context.Context, repo *repo_model.Repository, task 
 		Conclusion:  conclusion,
 		RunnerID:    runnerID,
 		RunnerName:  runnerName,
-		Steps:       steps,
+		Steps:       util.SliceNilAsEmpty(steps),
 		CreatedAt:   job.Created.AsTime().UTC(),
 		StartedAt:   job.Started.AsTime().UTC(),
 		CompletedAt: job.Stopped.AsTime().UTC(),
 	}, nil
 }
 
-func getActionWorkflowEntry(ctx context.Context, repo *repo_model.Repository, commit *git.Commit, folder string, entry *git.TreeEntry) *api.ActionWorkflow {
+func getActionWorkflowEntry(ctx context.Context, repo *repo_model.Repository, commit *git.Commit, refName git.RefName, folder string, entry *git.TreeEntry) *api.ActionWorkflow {
 	cfgUnit := repo.MustGetUnit(ctx, unit.TypeActions)
 	cfg := cfgUnit.ActionsConfig()
 
-	defaultBranch, _ := commit.GetBranchName()
-
 	workflowURL := fmt.Sprintf("%s/actions/workflows/%s", repo.APIURL(), util.PathEscapeSegments(entry.Name()))
-	workflowRepoURL := fmt.Sprintf("%s/src/branch/%s/%s/%s", repo.HTMLURL(ctx), util.PathEscapeSegments(defaultBranch), util.PathEscapeSegments(folder), util.PathEscapeSegments(entry.Name()))
+	workflowRepoURL := fmt.Sprintf("%s/src/commit/%s/%s/%s", repo.HTMLURL(ctx), commit.ID.String(), util.PathEscapeSegments(folder), util.PathEscapeSegments(entry.Name()))
+	if refWebLinkPath := refName.RefWebLinkPath(); refWebLinkPath != "" {
+		workflowRepoURL = fmt.Sprintf("%s/src/%s/%s/%s", repo.HTMLURL(ctx), refWebLinkPath, util.PathEscapeSegments(folder), util.PathEscapeSegments(entry.Name()))
+	}
 	badgeURL := fmt.Sprintf("%s/actions/workflows/%s/badge.svg?branch=%s", repo.HTMLURL(ctx), util.PathEscapeSegments(entry.Name()), url.QueryEscape(repo.DefaultBranch))
 
 	// See https://docs.github.com/en/rest/actions/workflows?apiVersion=2022-11-28#get-a-workflow
@@ -462,21 +494,47 @@ func ListActionWorkflows(ctx context.Context, gitrepo *git.Repository, repo *rep
 
 	workflows := make([]*api.ActionWorkflow, len(entries))
 	for i, entry := range entries {
-		workflows[i] = getActionWorkflowEntry(ctx, repo, defaultBranchCommit, folder, entry)
+		workflows[i] = getActionWorkflowEntry(ctx, repo, defaultBranchCommit, git.RefNameFromBranch(repo.DefaultBranch), folder, entry)
 	}
 
 	return workflows, nil
 }
 
 func GetActionWorkflow(ctx context.Context, gitrepo *git.Repository, repo *repo_model.Repository, workflowID string) (*api.ActionWorkflow, error) {
-	entries, err := ListActionWorkflows(ctx, gitrepo, repo)
+	defaultBranchCommit, err := gitrepo.GetBranchCommit(repo.DefaultBranch)
+	if err != nil {
+		return nil, err
+	}
+
+	return getActionWorkflowFromCommit(ctx, repo, defaultBranchCommit, git.RefNameFromBranch(repo.DefaultBranch), workflowID)
+}
+
+func GetActionWorkflowByRef(ctx context.Context, gitrepo *git.Repository, repo *repo_model.Repository, workflowID string, ref git.RefName) (*api.ActionWorkflow, error) {
+	if ref == "" {
+		return nil, util.NewNotExistErrorf("workflow %q not found", workflowID)
+	}
+
+	refCommitID, err := gitrepo.GetRefCommitID(ref.String())
+	if err != nil {
+		return nil, err
+	}
+	refCommit, err := gitrepo.GetCommit(refCommitID)
+	if err != nil {
+		return nil, err
+	}
+
+	return getActionWorkflowFromCommit(ctx, repo, refCommit, ref, workflowID)
+}
+
+func getActionWorkflowFromCommit(ctx context.Context, repo *repo_model.Repository, commit *git.Commit, refName git.RefName, workflowID string) (*api.ActionWorkflow, error) {
+	folder, entries, err := actions.ListWorkflows(commit)
 	if err != nil {
 		return nil, err
 	}
 
 	for _, entry := range entries {
-		if entry.ID == workflowID {
-			return entry, nil
+		if entry.Name() == workflowID {
+			return getActionWorkflowEntry(ctx, repo, commit, refName, folder, entry), nil
 		}
 	}
 
@@ -524,6 +582,7 @@ func ToActionRunner(ctx context.Context, runner *actions_model.ActionRunner) *ap
 		Name:      runner.Name,
 		Status:    apiStatus,
 		Busy:      status == runnerv1.RunnerStatus_RUNNER_STATUS_ACTIVE,
+		Disabled:  runner.IsDisabled,
 		Ephemeral: runner.Ephemeral,
 		Labels:    labels,
 	}
@@ -542,8 +601,9 @@ func ToVerification(ctx context.Context, c *git.Commit) *api.PayloadCommitVerifi
 	}
 	if verif.SigningUser != nil {
 		commitVerification.Signer = &api.PayloadUser{
-			Name:  verif.SigningUser.Name,
-			Email: verif.SigningUser.Email,
+			UserName: verif.SigningUser.Name,
+			Name:     verif.SigningUser.DisplayName(),
+			Email:    verif.SigningEmail, // Use the email from the signature, not from the user profile
 		}
 	}
 	return commitVerification
@@ -703,7 +763,7 @@ func ToAnnotatedTag(ctx context.Context, repo *repo_model.Repository, t *git.Tag
 		SHA:          t.ID.String(),
 		Object:       ToAnnotatedTagObject(repo, c),
 		Message:      t.Message,
-		URL:          util.URLJoin(repo.APIURL(), "git/tags", t.ID.String()),
+		URL:          repo.APIURL() + "/git/tags/" + t.ID.String(),
 		Tagger:       ToCommitUser(t.Tagger),
 		Verification: ToVerification(ctx, c),
 	}
@@ -714,13 +774,13 @@ func ToAnnotatedTagObject(repo *repo_model.Repository, commit *git.Commit) *api.
 	return &api.AnnotatedTagObject{
 		SHA:  commit.ID.String(),
 		Type: string(git.ObjectCommit),
-		URL:  util.URLJoin(repo.APIURL(), "git/commits", commit.ID.String()),
+		URL:  repo.APIURL() + "/git/commits/" + commit.ID.String(),
 	}
 }
 
 // ToTagProtection convert a git.ProtectedTag to an api.TagProtection
 func ToTagProtection(ctx context.Context, pt *git_model.ProtectedTag, repo *repo_model.Repository) *api.TagProtection {
-	readers, err := access_model.GetRepoReaders(ctx, repo)
+	readers, err := access_model.GetUsersWithUnitAccess(ctx, repo, perm.AccessModeRead, unit.TypePullRequests)
 	if err != nil {
 		log.Error("GetRepoReaders: %v", err)
 	}
@@ -771,7 +831,7 @@ func ToOAuth2Application(app *auth.OAuth2Application) *api.OAuth2Application {
 
 // ToLFSLock convert a LFSLock to api.LFSLock
 func ToLFSLock(ctx context.Context, l *git_model.LFSLock) *api.LFSLock {
-	u, err := user_model.GetUserByID(ctx, l.OwnerID)
+	u, err := user_model.GetPossibleUserByID(ctx, l.OwnerID)
 	if err != nil {
 		return nil
 	}

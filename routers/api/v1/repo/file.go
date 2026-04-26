@@ -15,13 +15,11 @@ import (
 	"time"
 
 	git_model "code.gitea.io/gitea/models/git"
-	repo_model "code.gitea.io/gitea/models/repo"
 	"code.gitea.io/gitea/modules/git"
-	"code.gitea.io/gitea/modules/gitrepo"
 	"code.gitea.io/gitea/modules/httpcache"
+	"code.gitea.io/gitea/modules/httplib"
 	"code.gitea.io/gitea/modules/json"
 	"code.gitea.io/gitea/modules/lfs"
-	"code.gitea.io/gitea/modules/log"
 	"code.gitea.io/gitea/modules/setting"
 	"code.gitea.io/gitea/modules/storage"
 	api "code.gitea.io/gitea/modules/structs"
@@ -31,7 +29,6 @@ import (
 	"code.gitea.io/gitea/routers/common"
 	"code.gitea.io/gitea/services/context"
 	pull_service "code.gitea.io/gitea/services/pull"
-	archiver_service "code.gitea.io/gitea/services/repository/archiver"
 	files_service "code.gitea.io/gitea/services/repository/files"
 )
 
@@ -141,7 +138,7 @@ func GetRawFileOrLFS(ctx *context.APIContext) {
 	// LFS Pointer files are at most 1024 bytes - so any blob greater than 1024 bytes cannot be an LFS file
 	if blob.Size() > lfs.MetaFileMaxSize {
 		// First handle caching for the blob
-		if httpcache.HandleGenericETagTimeCache(ctx.Req, ctx.Resp, `"`+blob.ID.String()+`"`, lastModified) {
+		if httpcache.HandleGenericETagPrivateCache(ctx.Req, ctx.Resp, `"`+blob.ID.String()+`"`, lastModified) {
 			return
 		}
 
@@ -154,35 +151,18 @@ func GetRawFileOrLFS(ctx *context.APIContext) {
 
 	// OK, now the blob is known to have at most 1024 (lfs pointer max size) bytes,
 	// we can simply read this in one go (This saves reading it twice)
-	dataRc, err := blob.DataAsync()
+	lfsPointerBuf, err := blob.GetBlobBytes(lfs.MetaFileMaxSize)
 	if err != nil {
 		ctx.APIErrorInternal(err)
 		return
-	}
-
-	buf, err := io.ReadAll(dataRc)
-	if err != nil {
-		_ = dataRc.Close()
-		ctx.APIErrorInternal(err)
-		return
-	}
-
-	if err := dataRc.Close(); err != nil {
-		log.Error("Error whilst closing blob %s reader in %-v. Error: %v", blob.ID, ctx.Repo.Repository, err)
 	}
 
 	// Check if the blob represents a pointer
-	pointer, _ := lfs.ReadPointer(bytes.NewReader(buf))
+	pointer, _ := lfs.ReadPointerFromBuffer(lfsPointerBuf)
 
 	// if it's not a pointer, just serve the data directly
 	if !pointer.IsValid() {
-		// First handle caching for the blob
-		if httpcache.HandleGenericETagTimeCache(ctx.Req, ctx.Resp, `"`+blob.ID.String()+`"`, lastModified) {
-			return
-		}
-
-		// If not cached - serve!
-		common.ServeContentByReader(ctx.Base, ctx.Repo.TreePath, blob.Size(), bytes.NewReader(buf))
+		_, _ = ctx.Resp.Write(lfsPointerBuf)
 		return
 	}
 
@@ -191,12 +171,7 @@ func GetRawFileOrLFS(ctx *context.APIContext) {
 
 	// If there isn't one, just serve the data directly
 	if errors.Is(err, git_model.ErrLFSObjectNotExist) {
-		// Handle caching for the blob SHA (not the LFS object OID)
-		if httpcache.HandleGenericETagTimeCache(ctx.Req, ctx.Resp, `"`+blob.ID.String()+`"`, lastModified) {
-			return
-		}
-
-		common.ServeContentByReader(ctx.Base, ctx.Repo.TreePath, blob.Size(), bytes.NewReader(buf))
+		_, _ = ctx.Resp.Write(lfsPointerBuf)
 		return
 	} else if err != nil {
 		ctx.APIErrorInternal(err)
@@ -204,27 +179,26 @@ func GetRawFileOrLFS(ctx *context.APIContext) {
 	}
 
 	// Handle caching for the LFS object OID
-	if httpcache.HandleGenericETagCache(ctx.Req, ctx.Resp, `"`+pointer.Oid+`"`) {
+	if httpcache.HandleGenericETagPrivateCache(ctx.Req, ctx.Resp, `"`+pointer.Oid+`"`, meta.UpdatedUnix.AsTimePtr()) {
 		return
 	}
 
 	if setting.LFS.Storage.ServeDirect() {
 		// If we have a signed url (S3, object storage), redirect to this directly.
-		u, err := storage.LFS.URL(pointer.RelativePath(), blob.Name(), ctx.Req.Method, nil)
+		u, err := storage.LFS.ServeDirectURL(pointer.RelativePath(), blob.Name(), ctx.Req.Method, nil)
 		if u != nil && err == nil {
 			ctx.Redirect(u.String())
 			return
 		}
 	}
 
-	lfsDataRc, err := lfs.ReadMetaObject(meta.Pointer)
+	lfsDataFile, err := lfs.ReadMetaObject(meta.Pointer)
 	if err != nil {
 		ctx.APIErrorInternal(err)
 		return
 	}
-	defer lfsDataRc.Close()
-
-	common.ServeContentByReadSeeker(ctx.Base, ctx.Repo.TreePath, lastModified, lfsDataRc)
+	defer lfsDataFile.Close()
+	httplib.ServeUserContentByFile(ctx.Base.Req, ctx.Base.Resp, lfsDataFile, httplib.ServeHeaderOptions{Filename: ctx.Repo.TreePath})
 }
 
 func getBlobForEntry(ctx *context.APIContext) (blob *git.Blob, entry *git.TreeEntry, lastModified *time.Time) {
@@ -276,80 +250,19 @@ func GetArchive(ctx *context.APIContext) {
 	//   description: the git reference for download with attached archive format (e.g. master.zip)
 	//   type: string
 	//   required: true
+	// - name: path
+	//   in: query
+	//   type: array
+	//   items:
+	//     type: string
+	//   description: subpath of the repository to download
+	//   collectionFormat: multi
 	// responses:
 	//   200:
 	//     description: success
 	//   "404":
 	//     "$ref": "#/responses/notFound"
-
-	if ctx.Repo.GitRepo == nil {
-		var err error
-		ctx.Repo.GitRepo, err = gitrepo.RepositoryFromRequestContextOrOpen(ctx, ctx.Repo.Repository)
-		if err != nil {
-			ctx.APIErrorInternal(err)
-			return
-		}
-	}
-
-	archiveDownload(ctx)
-}
-
-func archiveDownload(ctx *context.APIContext) {
-	aReq, err := archiver_service.NewRequest(ctx.Repo.Repository.ID, ctx.Repo.GitRepo, ctx.PathParam("*"))
-	if err != nil {
-		if errors.Is(err, archiver_service.ErrUnknownArchiveFormat{}) {
-			ctx.APIError(http.StatusBadRequest, err)
-		} else if errors.Is(err, archiver_service.RepoRefNotFoundError{}) {
-			ctx.APIError(http.StatusNotFound, err)
-		} else {
-			ctx.APIErrorInternal(err)
-		}
-		return
-	}
-
-	archiver, err := aReq.Await(ctx)
-	if err != nil {
-		ctx.APIErrorInternal(err)
-		return
-	}
-
-	download(ctx, aReq.GetArchiveName(), archiver)
-}
-
-func download(ctx *context.APIContext, archiveName string, archiver *repo_model.RepoArchiver) {
-	downloadName := ctx.Repo.Repository.Name + "-" + archiveName
-
-	// Add nix format link header so tarballs lock correctly:
-	// https://github.com/nixos/nix/blob/56763ff918eb308db23080e560ed2ea3e00c80a7/doc/manual/src/protocols/tarball-fetcher.md
-	ctx.Resp.Header().Add("Link", fmt.Sprintf(`<%s/archive/%s.%s?rev=%s>; rel="immutable"`,
-		ctx.Repo.Repository.APIURL(),
-		archiver.CommitID,
-		archiver.Type.String(),
-		archiver.CommitID,
-	))
-
-	rPath := archiver.RelativePath()
-	if setting.RepoArchive.Storage.ServeDirect() {
-		// If we have a signed url (S3, object storage), redirect to this directly.
-		u, err := storage.RepoArchives.URL(rPath, downloadName, ctx.Req.Method, nil)
-		if u != nil && err == nil {
-			ctx.Redirect(u.String())
-			return
-		}
-	}
-
-	// If we have matched and access to release or issue
-	fr, err := storage.RepoArchives.Open(rPath)
-	if err != nil {
-		ctx.APIErrorInternal(err)
-		return
-	}
-	defer fr.Close()
-
-	ctx.ServeContent(fr, &context.ServeHeaderOptions{
-		Filename:     downloadName,
-		LastModified: archiver.CreatedUnix.AsLocalTime(),
-	})
+	serveRepoArchive(ctx, ctx.PathParam("*"), ctx.FormStrings("path"))
 }
 
 // GetEditorconfig get editor config of a repository
@@ -425,6 +338,7 @@ func ReqChangeRepoFileOptionsAndCheck(ctx *context.APIContext) {
 		Message:   commonOpts.Message,
 		OldBranch: commonOpts.BranchName,
 		NewBranch: commonOpts.NewBranchName,
+		ForcePush: commonOpts.ForcePush,
 		Committer: &files_service.IdentityOptions{
 			GitUserName:  commonOpts.Committer.Name,
 			GitUserEmail: commonOpts.Committer.Email,
@@ -439,11 +353,11 @@ func ReqChangeRepoFileOptionsAndCheck(ctx *context.APIContext) {
 		},
 		Signoff: commonOpts.Signoff,
 	}
-	if commonOpts.Dates.Author.IsZero() {
-		commonOpts.Dates.Author = time.Now()
+	if changeFileOpts.Dates.Author.IsZero() {
+		changeFileOpts.Dates.Author = time.Now()
 	}
-	if commonOpts.Dates.Committer.IsZero() {
-		commonOpts.Dates.Committer = time.Now()
+	if changeFileOpts.Dates.Committer.IsZero() {
+		changeFileOpts.Dates.Committer = time.Now()
 	}
 	ctx.Data["__APIChangeRepoFilesOptions"] = changeFileOpts
 }
@@ -594,7 +508,7 @@ func CreateFile(ctx *context.APIContext) {
 func UpdateFile(ctx *context.APIContext) {
 	// swagger:operation PUT /repos/{owner}/{repo}/contents/{filepath} repository repoUpdateFile
 	// ---
-	// summary: Update a file in a repository
+	// summary: Update a file in a repository if SHA is set, or create the file if SHA is not set
 	// consumes:
 	// - application/json
 	// produces:
@@ -623,6 +537,8 @@ func UpdateFile(ctx *context.APIContext) {
 	// responses:
 	//   "200":
 	//     "$ref": "#/responses/FileResponse"
+	//   "201":
+	//     "$ref": "#/responses/FileResponse"
 	//   "403":
 	//     "$ref": "#/responses/error"
 	//   "404":
@@ -641,8 +557,9 @@ func UpdateFile(ctx *context.APIContext) {
 		ctx.APIError(http.StatusUnprocessableEntity, err)
 		return
 	}
+	willCreate := apiOpts.SHA == ""
 	opts.Files = append(opts.Files, &files_service.ChangeRepoFile{
-		Operation:     "update",
+		Operation:     util.Iif(willCreate, "create", "update"),
 		ContentReader: contentReader,
 		SHA:           apiOpts.SHA,
 		FromTreePath:  apiOpts.FromPath,
@@ -656,11 +573,16 @@ func UpdateFile(ctx *context.APIContext) {
 		handleChangeRepoFilesError(ctx, err)
 	} else {
 		fileResponse := files_service.GetFileResponseFromFilesResponse(filesResponse, 0)
-		ctx.JSON(http.StatusOK, fileResponse)
+		ctx.JSON(util.Iif(willCreate, http.StatusCreated, http.StatusOK), fileResponse)
 	}
 }
 
 func handleChangeRepoFilesError(ctx *context.APIContext, err error) {
+	if git.IsErrPushRejected(err) {
+		err := err.(*git.ErrPushRejected)
+		ctx.APIError(http.StatusForbidden, err.Message)
+		return
+	}
 	if files_service.IsErrUserCannotCommit(err) || pull_service.IsErrFilePathProtected(err) {
 		ctx.APIError(http.StatusForbidden, err)
 		return
@@ -669,10 +591,6 @@ func handleChangeRepoFilesError(ctx *context.APIContext, err error) {
 		files_service.IsErrFilePathInvalid(err) || files_service.IsErrRepoFileAlreadyExists(err) ||
 		files_service.IsErrCommitIDDoesNotMatch(err) || files_service.IsErrSHAOrCommitIDNotProvided(err) {
 		ctx.APIError(http.StatusUnprocessableEntity, err)
-		return
-	}
-	if git.IsErrBranchNotExist(err) || files_service.IsErrRepoFileDoesNotExist(err) || git.IsErrNotExist(err) {
-		ctx.APIError(http.StatusNotFound, err)
 		return
 	}
 	if errors.Is(err, util.ErrNotExist) {

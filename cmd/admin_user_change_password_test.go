@@ -4,6 +4,7 @@
 package cmd
 
 import (
+	"io"
 	"testing"
 
 	"code.gitea.io/gitea/models/db"
@@ -18,12 +19,12 @@ func TestChangePasswordCommand(t *testing.T) {
 	ctx := t.Context()
 
 	defer func() {
-		require.NoError(t, db.TruncateBeans(db.DefaultContext, &user_model.User{}))
+		require.NoError(t, db.TruncateBeans(t.Context(), &user_model.User{}))
 	}()
 
 	t.Run("change password successfully", func(t *testing.T) {
 		// defer func() {
-		// 	require.NoError(t, db.TruncateBeans(db.DefaultContext, &user_model.User{}))
+		// 	require.NoError(t, db.TruncateBeans(t.Context(), &user_model.User{}))
 		// }()
 		// Prepare test user
 		unittest.AssertNotExistsBean(t, &user_model.User{LowerName: "testuser"})
@@ -82,7 +83,9 @@ func TestChangePasswordCommand(t *testing.T) {
 
 		for _, tc := range testCases {
 			t.Run(tc.name, func(t *testing.T) {
-				err := microcmdUserChangePassword().Run(ctx, tc.args)
+				cmd := microcmdUserChangePassword()
+				cmd.Writer, cmd.ErrWriter = io.Discard, io.Discard
+				err := cmd.Run(ctx, tc.args)
 				require.Error(t, err)
 				require.Contains(t, err.Error(), tc.expectedErr)
 			})

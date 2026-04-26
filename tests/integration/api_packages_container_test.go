@@ -16,7 +16,6 @@ import (
 	"testing"
 
 	auth_model "code.gitea.io/gitea/models/auth"
-	"code.gitea.io/gitea/models/db"
 	packages_model "code.gitea.io/gitea/models/packages"
 	"code.gitea.io/gitea/models/unittest"
 	user_model "code.gitea.io/gitea/models/user"
@@ -29,6 +28,7 @@ import (
 
 	oci "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestPackageContainer(t *testing.T) {
@@ -71,13 +71,12 @@ func TestPackageContainer(t *testing.T) {
 
 	manifestDigest := "sha256:4f10484d1c1bb13e3956b4de1cd42db8e0f14a75be1617b60f2de3cd59c803c6"
 	manifestContent := `{"schemaVersion":2,"mediaType":"` + container_module.ContentTypeDockerDistributionManifestV2 + `","config":{"mediaType":"application/vnd.docker.container.image.v1+json","digest":"sha256:4607e093bec406eaadb6f3a340f63400c9d3a7038680744c406903766b938f0d","size":1069},"layers":[{"mediaType":"application/vnd.docker.image.rootfs.diff.tar.gzip","digest":"sha256:a3ed95caeb02ffe68cdd9fd84406680ae93d633cb16422d00e8a7c22955b46d4","size":32}]}`
-	manifestContentType := container_module.ContentTypeDockerDistributionManifestV2
 
 	untaggedManifestDigest := "sha256:4305f5f5572b9a426b88909b036e52ee3cf3d7b9c1b01fac840e90747f56623d"
 	untaggedManifestContent := `{"schemaVersion":2,"mediaType":"` + oci.MediaTypeImageManifest + `","config":{"mediaType":"application/vnd.docker.container.image.v1+json","digest":"sha256:4607e093bec406eaadb6f3a340f63400c9d3a7038680744c406903766b938f0d","size":1069},"layers":[{"mediaType":"application/vnd.docker.image.rootfs.diff.tar.gzip","digest":"sha256:a3ed95caeb02ffe68cdd9fd84406680ae93d633cb16422d00e8a7c22955b46d4","size":32}]}`
 
-	indexManifestDigest := "sha256:bab112d6efb9e7f221995caaaa880352feb5bd8b1faf52fae8d12c113aa123ec"
-	indexManifestContent := `{"schemaVersion":2,"mediaType":"` + oci.MediaTypeImageIndex + `","manifests":[{"mediaType":"application/vnd.docker.distribution.manifest.v2+json","digest":"` + manifestDigest + `","platform":{"os":"linux","architecture":"arm","variant":"v7"}},{"mediaType":"` + oci.MediaTypeImageManifest + `","digest":"` + untaggedManifestDigest + `","platform":{"os":"linux","architecture":"arm64","variant":"v8"}}]}`
+	indexManifestDigest := "sha256:2c6b5afb967d5de02795ee1d177c3746d005df4b4c2b829385b0d186b3414b6b"
+	indexManifestContent := `{"schemaVersion":2,"mediaType":"` + oci.MediaTypeImageIndex + `","is_tagged":true,"manifests":[{"mediaType":"application/vnd.docker.distribution.manifest.v2+json","digest":"` + manifestDigest + `","platform":{"os":"linux","architecture":"arm","variant":"v7"}},{"mediaType":"` + oci.MediaTypeImageManifest + `","digest":"` + untaggedManifestDigest + `","platform":{"os":"linux","architecture":"arm64","variant":"v8"}}]}`
 
 	anonymousToken := ""
 	userToken := ""
@@ -89,34 +88,34 @@ func TestPackageContainer(t *testing.T) {
 			Token string `json:"token"`
 		}
 
-		defaultAuthenticateValues := []string{`Bearer realm="` + setting.AppURL + `v2/token",service="container_registry",scope="*"`}
-
+		wwwAuthenticateForPublic := []string{
+			`Bearer realm="` + setting.AppURL + `v2/token",service="container_registry",scope="*"`,
+		}
+		wwwAuthenticateForRequiredSignIn := []string{
+			`Bearer realm="` + setting.AppURL + `v2/token",service="container_registry",scope="*"`,
+			`Basic realm="Gitea Container Registry"`,
+		}
 		t.Run("Anonymous", func(t *testing.T) {
 			defer tests.PrintCurrentTest(t)()
 
 			req := NewRequest(t, "GET", setting.AppURL+"v2")
 			resp := MakeRequest(t, req, http.StatusUnauthorized)
-
-			assert.ElementsMatch(t, defaultAuthenticateValues, resp.Header().Values("WWW-Authenticate"))
+			assert.ElementsMatch(t, wwwAuthenticateForPublic, resp.Header().Values("WWW-Authenticate"))
 
 			req = NewRequest(t, "GET", setting.AppURL+"v2/token")
 			resp = MakeRequest(t, req, http.StatusOK)
-
-			tokenResponse := &TokenResponse{}
-			DecodeJSON(t, resp, &tokenResponse)
-
-			assert.NotEmpty(t, tokenResponse.Token)
-
+			tokenResponse := DecodeJSON(t, resp, &TokenResponse{})
+			require.NotEmpty(t, tokenResponse.Token)
 			anonymousToken = "Bearer " + tokenResponse.Token
 
-			req = NewRequest(t, "GET", setting.AppURL+"v2").
-				AddTokenAuth(anonymousToken)
+			req = NewRequest(t, "GET", setting.AppURL+"v2").AddTokenAuth(anonymousToken)
 			MakeRequest(t, req, http.StatusOK)
 
 			defer test.MockVariableValue(&setting.Service.RequireSignInViewStrict, true)()
 
 			req = NewRequest(t, "GET", setting.AppURL+"v2")
-			MakeRequest(t, req, http.StatusUnauthorized)
+			resp = MakeRequest(t, req, http.StatusUnauthorized)
+			assert.ElementsMatch(t, wwwAuthenticateForRequiredSignIn, resp.Header().Values("WWW-Authenticate"))
 
 			req = NewRequest(t, "GET", setting.AppURL+"v2/token")
 			MakeRequest(t, req, http.StatusUnauthorized)
@@ -133,17 +132,13 @@ func TestPackageContainer(t *testing.T) {
 
 			req := NewRequest(t, "GET", setting.AppURL+"v2")
 			resp := MakeRequest(t, req, http.StatusUnauthorized)
+			assert.ElementsMatch(t, wwwAuthenticateForPublic, resp.Header().Values("WWW-Authenticate"))
 
-			assert.ElementsMatch(t, defaultAuthenticateValues, resp.Header().Values("WWW-Authenticate"))
-
-			req = NewRequest(t, "GET", setting.AppURL+"v2/token").
-				AddBasicAuth(user.Name)
+			req = NewRequest(t, "GET", setting.AppURL+"v2/token").AddBasicAuth(user.Name)
 			resp = MakeRequest(t, req, http.StatusOK)
-
-			tokenResponse := &TokenResponse{}
-			DecodeJSON(t, resp, &tokenResponse)
-
+			tokenResponse := DecodeJSON(t, resp, &TokenResponse{})
 			assert.NotEmpty(t, tokenResponse.Token)
+
 			pkgMeta, err := package_service.ParseAuthorizationToken(tokenResponse.Token)
 			assert.NoError(t, err)
 			assert.Equal(t, user.ID, pkgMeta.UserID)
@@ -251,14 +246,14 @@ func TestPackageContainer(t *testing.T) {
 				assert.Equal(t, fmt.Sprintf("/v2/%s/%s/blobs/%s", user.Name, image, blobDigest), resp.Header().Get("Location"))
 				assert.Equal(t, blobDigest, resp.Header().Get("Docker-Content-Digest"))
 
-				pv, err := packages_model.GetInternalVersionByNameAndVersion(db.DefaultContext, user.ID, packages_model.TypeContainer, image, container_module.UploadVersion)
+				pv, err := packages_model.GetInternalVersionByNameAndVersion(t.Context(), user.ID, packages_model.TypeContainer, image, container_module.UploadVersion)
 				assert.NoError(t, err)
 
-				pfs, err := packages_model.GetFilesByVersionID(db.DefaultContext, pv.ID)
+				pfs, err := packages_model.GetFilesByVersionID(t.Context(), pv.ID)
 				assert.NoError(t, err)
 				assert.Len(t, pfs, 1)
 
-				pb, err := packages_model.GetBlobByID(db.DefaultContext, pfs[0].BlobID)
+				pb, err := packages_model.GetBlobByID(t.Context(), pfs[0].BlobID)
 				assert.NoError(t, err)
 				assert.EqualValues(t, len(blobContent), pb.Size)
 			})
@@ -281,7 +276,7 @@ func TestPackageContainer(t *testing.T) {
 				uuid := resp.Header().Get("Docker-Upload-Uuid")
 				assert.NotEmpty(t, uuid)
 
-				pbu, err := packages_model.GetBlobUploadByID(db.DefaultContext, uuid)
+				pbu, err := packages_model.GetBlobUploadByID(t.Context(), uuid)
 				assert.NoError(t, err)
 				assert.EqualValues(t, 0, pbu.BytesReceived)
 
@@ -325,7 +320,7 @@ func TestPackageContainer(t *testing.T) {
 				assert.Equal(t, uploadURL, resp.Header().Get("Location"))
 				assert.Equal(t, contentRange, resp.Header().Get("Range"))
 
-				pbu, err = packages_model.GetBlobUploadByID(db.DefaultContext, uuid)
+				pbu, err = packages_model.GetBlobUploadByID(t.Context(), uuid)
 				assert.NoError(t, err)
 				assert.EqualValues(t, len(blobContent), pbu.BytesReceived)
 
@@ -423,10 +418,10 @@ func TestPackageContainer(t *testing.T) {
 
 						assert.Equal(t, manifestDigest, resp.Header().Get("Docker-Content-Digest"))
 
-						pv, err := packages_model.GetVersionByNameAndVersion(db.DefaultContext, user.ID, packages_model.TypeContainer, image, tag)
+						pv, err := packages_model.GetVersionByNameAndVersion(t.Context(), user.ID, packages_model.TypeContainer, image, tag)
 						assert.NoError(t, err)
 
-						pd, err := packages_model.GetPackageDescriptor(db.DefaultContext, pv)
+						pd, err := packages_model.GetPackageDescriptor(t.Context(), pv)
 						assert.NoError(t, err)
 						assert.Nil(t, pd.SemVer)
 						assert.Equal(t, image, pd.Package.Name)
@@ -464,19 +459,20 @@ func TestPackageContainer(t *testing.T) {
 							AddTokenAuth(userToken)
 						MakeRequest(t, req, http.StatusOK)
 
-						pv, err = packages_model.GetVersionByNameAndVersion(db.DefaultContext, user.ID, packages_model.TypeContainer, image, tag)
+						pv, err = packages_model.GetVersionByNameAndVersion(t.Context(), user.ID, packages_model.TypeContainer, image, tag)
 						assert.NoError(t, err)
 						assert.EqualValues(t, 1, pv.DownloadCount)
 
-						// Overwrite existing tag should keep the download count
-						req = NewRequestWithBody(t, "PUT", fmt.Sprintf("%s/manifests/%s", url, tag), strings.NewReader(manifestContent)).
-							AddTokenAuth(userToken).
-							SetHeader("Content-Type", oci.MediaTypeImageManifest)
-						MakeRequest(t, req, http.StatusCreated)
+						t.Run("OverwriteTagKeepDownloadCount", func(t *testing.T) {
+							req = NewRequestWithBody(t, "PUT", fmt.Sprintf("%s/manifests/%s", url, tag), strings.NewReader(manifestContent)).
+								AddTokenAuth(userToken).
+								SetHeader("Content-Type", oci.MediaTypeImageManifest)
+							MakeRequest(t, req, http.StatusCreated)
 
-						pv, err = packages_model.GetVersionByNameAndVersion(db.DefaultContext, user.ID, packages_model.TypeContainer, image, tag)
-						assert.NoError(t, err)
-						assert.EqualValues(t, 1, pv.DownloadCount)
+							pv, err = packages_model.GetVersionByNameAndVersion(t.Context(), user.ID, packages_model.TypeContainer, image, tag)
+							assert.NoError(t, err)
+							assert.EqualValues(t, 1, pv.DownloadCount)
+						})
 					})
 
 					t.Run("HeadManifest", func(t *testing.T) {
@@ -506,7 +502,7 @@ func TestPackageContainer(t *testing.T) {
 						resp := MakeRequest(t, req, http.StatusOK)
 
 						assert.Equal(t, strconv.Itoa(len(manifestContent)), resp.Header().Get("Content-Length"))
-						assert.Equal(t, manifestContentType, resp.Header().Get("Content-Type"))
+						assert.Equal(t, oci.MediaTypeImageManifest, resp.Header().Get("Content-Type")) // the manifest is overwritten by above OverwriteTagKeepDownloadCount
 						assert.Equal(t, manifestDigest, resp.Header().Get("Docker-Content-Digest"))
 						assert.Equal(t, manifestContent, resp.Body.String())
 					})
@@ -530,10 +526,10 @@ func TestPackageContainer(t *testing.T) {
 				assert.Equal(t, strconv.Itoa(len(untaggedManifestContent)), resp.Header().Get("Content-Length"))
 				assert.Equal(t, untaggedManifestDigest, resp.Header().Get("Docker-Content-Digest"))
 
-				pv, err := packages_model.GetVersionByNameAndVersion(db.DefaultContext, user.ID, packages_model.TypeContainer, image, untaggedManifestDigest)
+				pv, err := packages_model.GetVersionByNameAndVersion(t.Context(), user.ID, packages_model.TypeContainer, image, untaggedManifestDigest)
 				assert.NoError(t, err)
 
-				pd, err := packages_model.GetPackageDescriptor(db.DefaultContext, pv)
+				pd, err := packages_model.GetPackageDescriptor(t.Context(), pv)
 				assert.NoError(t, err)
 				assert.Nil(t, pd.SemVer)
 				assert.Equal(t, image, pd.Package.Name)
@@ -563,10 +559,10 @@ func TestPackageContainer(t *testing.T) {
 
 				assert.Equal(t, indexManifestDigest, resp.Header().Get("Docker-Content-Digest"))
 
-				pv, err := packages_model.GetVersionByNameAndVersion(db.DefaultContext, user.ID, packages_model.TypeContainer, image, multiTag)
+				pv, err := packages_model.GetVersionByNameAndVersion(t.Context(), user.ID, packages_model.TypeContainer, image, multiTag)
 				assert.NoError(t, err)
 
-				pd, err := packages_model.GetPackageDescriptor(db.DefaultContext, pv)
+				pd, err := packages_model.GetPackageDescriptor(t.Context(), pv)
 				assert.NoError(t, err)
 				assert.Nil(t, pd.SemVer)
 				assert.Equal(t, image, pd.Package.Name)
@@ -600,6 +596,17 @@ func TestPackageContainer(t *testing.T) {
 				assert.True(t, pd.Files[0].File.IsLead)
 				assert.Equal(t, oci.MediaTypeImageIndex, pd.Files[0].Properties.GetByName(container_module.PropertyMediaType))
 				assert.Equal(t, indexManifestDigest, pd.Files[0].Properties.GetByName(container_module.PropertyDigest))
+
+				lastPackageVersionID := pv.ID
+				t.Run("UploadAgain", func(t *testing.T) {
+					req := NewRequestWithBody(t, "PUT", fmt.Sprintf("%s/manifests/%s", url, multiTag), strings.NewReader(indexManifestContent)).
+						AddTokenAuth(userToken).
+						SetHeader("Content-Type", oci.MediaTypeImageIndex)
+					MakeRequest(t, req, http.StatusCreated)
+					pv, err := packages_model.GetVersionByNameAndVersion(t.Context(), user.ID, packages_model.TypeContainer, image, multiTag)
+					require.NoError(t, err)
+					assert.NotEqual(t, lastPackageVersionID, pv.ID)
+				})
 			})
 
 			t.Run("HeadBlob", func(t *testing.T) {
@@ -815,7 +822,6 @@ func TestPackageContainer(t *testing.T) {
 		newOwnerName := "newUsername"
 
 		req := NewRequestWithValues(t, "POST", "/user/settings", map[string]string{
-			"_csrf":    GetUserCSRFToken(t, session),
 			"name":     newOwnerName,
 			"email":    "user2@example.com",
 			"language": "en-US",
@@ -825,7 +831,6 @@ func TestPackageContainer(t *testing.T) {
 		t.Run(fmt.Sprintf("Catalog[%s]", newOwnerName), checkCatalog(newOwnerName))
 
 		req = NewRequestWithValues(t, "POST", "/user/settings", map[string]string{
-			"_csrf":    GetUserCSRFToken(t, session),
 			"name":     user.Name,
 			"email":    "user2@example.com",
 			"language": "en-US",

@@ -5,18 +5,17 @@ package integration
 
 import (
 	"archive/tar"
-	"archive/zip"
 	"bytes"
 	"fmt"
 	"io"
 	"net/http"
 	"testing"
 
-	"code.gitea.io/gitea/models/db"
 	"code.gitea.io/gitea/models/packages"
 	"code.gitea.io/gitea/models/unittest"
 	user_model "code.gitea.io/gitea/models/user"
 	conda_module "code.gitea.io/gitea/modules/packages/conda"
+	"code.gitea.io/gitea/modules/test"
 	"code.gitea.io/gitea/modules/zstd"
 	"code.gitea.io/gitea/tests"
 
@@ -74,11 +73,11 @@ func TestPackageConda(t *testing.T) {
 				AddBasicAuth(user.Name)
 			MakeRequest(t, req, http.StatusConflict)
 
-			pvs, err := packages.GetVersionsByPackageType(db.DefaultContext, user.ID, packages.TypeConda)
+			pvs, err := packages.GetVersionsByPackageType(t.Context(), user.ID, packages.TypeConda)
 			assert.NoError(t, err)
 			assert.Len(t, pvs, 1)
 
-			pd, err := packages.GetPackageDescriptor(db.DefaultContext, pvs[0])
+			pd, err := packages.GetPackageDescriptor(t.Context(), pvs[0])
 			assert.NoError(t, err)
 			assert.Nil(t, pd.SemVer)
 			assert.IsType(t, &conda_module.VersionMetadata{}, pd.Metadata)
@@ -95,11 +94,9 @@ func TestPackageConda(t *testing.T) {
 			io.Copy(zsw, bytes.NewReader(tarContent))
 			zsw.Close()
 
-			var buf bytes.Buffer
-			zpw := zip.NewWriter(&buf)
-			w, _ := zpw.Create("info-x.tar.zst")
-			w.Write(infoBuf.Bytes())
-			zpw.Close()
+			buf := test.WriteZipArchive(map[string]string{
+				"info-x.tar.zst": infoBuf.String(),
+			})
 
 			fullName := channel + "/" + packageName
 			filename := fmt.Sprintf("%s-%s.conda", packageName, packageVersion)
@@ -115,11 +112,11 @@ func TestPackageConda(t *testing.T) {
 				AddBasicAuth(user.Name)
 			MakeRequest(t, req, http.StatusConflict)
 
-			pvs, err := packages.GetVersionsByPackageType(db.DefaultContext, user.ID, packages.TypeConda)
+			pvs, err := packages.GetVersionsByPackageType(t.Context(), user.ID, packages.TypeConda)
 			assert.NoError(t, err)
 			assert.Len(t, pvs, 2)
 
-			pds, err := packages.GetPackageDescriptors(db.DefaultContext, pvs)
+			pds, err := packages.GetPackageDescriptors(t.Context(), pvs)
 			assert.NoError(t, err)
 
 			assert.Condition(t, func() bool {
@@ -212,10 +209,10 @@ func TestPackageConda(t *testing.T) {
 		t.Run(".tar.bz2", func(t *testing.T) {
 			defer tests.PrintCurrentTest(t)()
 
-			pv, err := packages.GetVersionByNameAndVersion(db.DefaultContext, user.ID, packages.TypeConda, packageName, packageVersion)
+			pv, err := packages.GetVersionByNameAndVersion(t.Context(), user.ID, packages.TypeConda, packageName, packageVersion)
 			assert.NoError(t, err)
 
-			pd, err := packages.GetPackageDescriptor(db.DefaultContext, pv)
+			pd, err := packages.GetPackageDescriptor(t.Context(), pv)
 			assert.NoError(t, err)
 
 			req := NewRequest(t, "GET", root+"/noarch/repodata.json")
@@ -238,15 +235,17 @@ func TestPackageConda(t *testing.T) {
 			assert.Equal(t, pd.Files[0].Blob.HashMD5, packageInfo.HashMD5)
 			assert.Equal(t, pd.Files[0].Blob.HashSHA256, packageInfo.HashSHA256)
 			assert.Equal(t, pd.Files[0].Blob.Size, packageInfo.Size)
+			assert.NotNil(t, packageInfo.Dependencies)
+			assert.Empty(t, packageInfo.Dependencies)
 		})
 
 		t.Run(".conda", func(t *testing.T) {
 			defer tests.PrintCurrentTest(t)()
 
-			pv, err := packages.GetVersionByNameAndVersion(db.DefaultContext, user.ID, packages.TypeConda, channel+"/"+packageName, packageVersion)
+			pv, err := packages.GetVersionByNameAndVersion(t.Context(), user.ID, packages.TypeConda, channel+"/"+packageName, packageVersion)
 			assert.NoError(t, err)
 
-			pd, err := packages.GetPackageDescriptor(db.DefaultContext, pv)
+			pd, err := packages.GetPackageDescriptor(t.Context(), pv)
 			assert.NoError(t, err)
 
 			req := NewRequest(t, "GET", fmt.Sprintf("%s/%s/noarch/repodata.json", root, channel))
@@ -269,6 +268,8 @@ func TestPackageConda(t *testing.T) {
 			assert.Equal(t, pd.Files[0].Blob.HashMD5, packageInfo.HashMD5)
 			assert.Equal(t, pd.Files[0].Blob.HashSHA256, packageInfo.HashSHA256)
 			assert.Equal(t, pd.Files[0].Blob.Size, packageInfo.Size)
+			assert.NotNil(t, packageInfo.Dependencies)
+			assert.Empty(t, packageInfo.Dependencies)
 		})
 	})
 }

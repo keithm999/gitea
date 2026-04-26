@@ -81,6 +81,7 @@ func Projects(ctx *context.Context) {
 			PageSize: setting.UI.IssuePagingNum,
 			Page:     page,
 		},
+		RepoID:   repo.ID,
 		IsClosed: optional.Some(isShowClosed),
 		OrderBy:  project_model.GetSearchOrderByBySortType(sortType),
 		Type:     project_model.TypeRepository,
@@ -161,12 +162,7 @@ func Projects(ctx *context.Context) {
 		ctx.Data["State"] = "open"
 	}
 
-	numPages := 0
-	if count > 0 {
-		numPages = (int(count) - 1/setting.UI.IssuePagingNum)
-	}
-
-	pager := context.NewPagination(total, setting.UI.IssuePagingNum, page, numPages)
+	pager := context.NewPagination(count, setting.UI.IssuePagingNum, page, 5)
 	pager.AddParamFromRequest(ctx.Req)
 	ctx.Data["Page"] = pager
 
@@ -361,13 +357,25 @@ func ViewProject(ctx *context.Context) {
 	}
 
 	preparedLabelFilter := issue.PrepareFilterIssueLabels(ctx, ctx.Repo.Repository.ID, ctx.Repo.Owner)
+	if ctx.Written() {
+		return
+	}
 
 	assigneeID := ctx.FormString("assignee")
+	milestoneID := ctx.FormInt64("milestone")
+
+	var milestoneIDs []int64
+	if milestoneID > 0 {
+		milestoneIDs = []int64{milestoneID}
+	} else if milestoneID == db.NoConditionID {
+		milestoneIDs = []int64{db.NoConditionID}
+	}
 
 	issuesMap, err := project_service.LoadIssuesFromProject(ctx, project, &issues_model.IssuesOptions{
-		RepoIDs:    []int64{ctx.Repo.Repository.ID},
-		LabelIDs:   preparedLabelFilter.SelectedLabelIDs,
-		AssigneeID: assigneeID,
+		RepoIDs:      []int64{ctx.Repo.Repository.ID},
+		LabelIDs:     preparedLabelFilter.SelectedLabelIDs,
+		AssigneeID:   assigneeID,
+		MilestoneIDs: milestoneIDs,
 	})
 	if err != nil {
 		ctx.ServerError("LoadIssuesOfColumns", err)
@@ -458,6 +466,12 @@ func ViewProject(ctx *context.Context) {
 	ctx.Data["Assignees"] = shared_user.MakeSelfOnTop(ctx.Doer, assigneeUsers)
 	ctx.Data["AssigneeID"] = assigneeID
 
+	renderMilestones(ctx)
+	if ctx.Written() {
+		return
+	}
+	ctx.Data["MilestoneID"] = milestoneID
+
 	rctx := renderhelper.NewRenderContextRepoComment(ctx, ctx.Repo.Repository)
 	project.RenderedContent, err = markdown.RenderString(rctx, project.Description)
 	if err != nil {
@@ -503,6 +517,54 @@ func UpdateIssueProject(ctx *context.Context) {
 			ctx.ServerError("IssueAssignOrRemoveProject", err)
 			return
 		}
+	}
+
+	ctx.JSONOK()
+}
+
+// UpdateIssueProjectColumn moves an issue to a different column within its project
+func UpdateIssueProjectColumn(ctx *context.Context) {
+	issue, err := issues_model.GetIssueByRepoID(ctx, ctx.Repo.Repository.ID, ctx.FormInt64("issue_id"))
+	if err != nil {
+		ctx.NotFoundOrServerError("GetIssueByID", issues_model.IsErrIssueNotExist, err)
+		return
+	}
+	column, err := project_model.GetColumn(ctx, ctx.FormInt64("id"))
+	if err != nil {
+		ctx.NotFoundOrServerError("GetColumn", project_model.IsErrProjectColumnNotExist, err)
+		return
+	}
+
+	if err := issue.LoadProject(ctx); err != nil {
+		ctx.ServerError("LoadProject", err)
+		return
+	}
+
+	issueProjects := []*project_model.Project{issue.Project} // TODO: this is for the multiple project support in the future
+
+	// it must make sure the requested column is in this issue's projects
+	var columnProject *project_model.Project
+	for _, project := range issueProjects {
+		if column.ProjectID == project.ID {
+			columnProject = project
+			break
+		}
+	}
+	if columnProject == nil {
+		ctx.NotFound(nil)
+		return
+	}
+
+	// append to the end of the target column so we don't collide with existing sorting values
+	newSorting, err := project_model.GetColumnIssueNextSorting(ctx, columnProject.ID, column.ID)
+	if err != nil {
+		ctx.ServerError("GetColumnIssueNextSorting", err)
+		return
+	}
+
+	if err := project_service.MoveIssuesOnProjectColumn(ctx, ctx.Doer, column, map[int64]int64{newSorting: issue.ID}); err != nil {
+		ctx.ServerError("MoveIssuesOnProjectColumn", err)
+		return
 	}
 
 	ctx.JSONOK()

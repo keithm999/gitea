@@ -20,82 +20,82 @@ import (
 	"code.gitea.io/gitea/modules/util"
 
 	"gitea.com/go-chi/session"
-	"github.com/mholt/archiver/v3"
 	"github.com/urfave/cli/v3"
 )
 
-// CmdDump represents the available dump sub-command.
-var CmdDump = &cli.Command{
-	Name:        "dump",
-	Usage:       "Dump Gitea files and database",
-	Description: `Dump compresses all related files and database into zip file. It can be used for backup and capture Gitea server image to send to maintainer`,
-	Action:      runDump,
-	Flags: []cli.Flag{
-		&cli.StringFlag{
-			Name:    "file",
-			Aliases: []string{"f"},
-			Usage:   `Name of the dump file which will be created, default to "gitea-dump-{time}.zip". Supply '-' for stdout. See type for available types.`,
+func newDumpCommand() *cli.Command {
+	return &cli.Command{
+		Name:        "dump",
+		Usage:       "Dump Gitea files and database",
+		Description: `Dump compresses all related files and database into zip file. It can be used for backup and capture Gitea server image to send to maintainer`,
+		Action:      runDump,
+		Flags: []cli.Flag{
+			&cli.StringFlag{
+				Name:    "file",
+				Aliases: []string{"f"},
+				Usage:   `Name of the dump file which will be created, default to "gitea-dump-{time}.zip". Supply '-' for stdout. See type for available types.`,
+			},
+			&cli.BoolFlag{
+				Name:    "verbose",
+				Aliases: []string{"V"},
+				Usage:   "Show process details",
+			},
+			&cli.BoolFlag{
+				Name:    "quiet",
+				Aliases: []string{"q"},
+				Usage:   "Only display warnings and errors",
+			},
+			&cli.StringFlag{
+				Name:    "tempdir",
+				Aliases: []string{"t"},
+				Value:   os.TempDir(),
+				Usage:   "Temporary dir path",
+			},
+			&cli.StringFlag{
+				Name:    "database",
+				Aliases: []string{"d"},
+				Usage:   "Specify the database SQL syntax: sqlite3, mysql, mssql, postgres",
+			},
+			&cli.BoolFlag{
+				Name:    "skip-repository",
+				Aliases: []string{"R"},
+				Usage:   "Skip the repository dumping",
+			},
+			&cli.BoolFlag{
+				Name:    "skip-log",
+				Aliases: []string{"L"},
+				Usage:   "Skip the log dumping",
+			},
+			&cli.BoolFlag{
+				Name:  "skip-custom-dir",
+				Usage: "Skip custom directory",
+			},
+			&cli.BoolFlag{
+				Name:  "skip-lfs-data",
+				Usage: "Skip LFS data",
+			},
+			&cli.BoolFlag{
+				Name:  "skip-attachment-data",
+				Usage: "Skip attachment data",
+			},
+			&cli.BoolFlag{
+				Name:  "skip-package-data",
+				Usage: "Skip package data",
+			},
+			&cli.BoolFlag{
+				Name:  "skip-index",
+				Usage: "Skip bleve index data",
+			},
+			&cli.BoolFlag{
+				Name:  "skip-db",
+				Usage: "Skip database",
+			},
+			&cli.StringFlag{
+				Name:  "type",
+				Usage: `Dump output format, default to "zip", supported types: ` + strings.Join(dump.SupportedOutputTypes, ", "),
+			},
 		},
-		&cli.BoolFlag{
-			Name:    "verbose",
-			Aliases: []string{"V"},
-			Usage:   "Show process details",
-		},
-		&cli.BoolFlag{
-			Name:    "quiet",
-			Aliases: []string{"q"},
-			Usage:   "Only display warnings and errors",
-		},
-		&cli.StringFlag{
-			Name:    "tempdir",
-			Aliases: []string{"t"},
-			Value:   os.TempDir(),
-			Usage:   "Temporary dir path",
-		},
-		&cli.StringFlag{
-			Name:    "database",
-			Aliases: []string{"d"},
-			Usage:   "Specify the database SQL syntax: sqlite3, mysql, mssql, postgres",
-		},
-		&cli.BoolFlag{
-			Name:    "skip-repository",
-			Aliases: []string{"R"},
-			Usage:   "Skip the repository dumping",
-		},
-		&cli.BoolFlag{
-			Name:    "skip-log",
-			Aliases: []string{"L"},
-			Usage:   "Skip the log dumping",
-		},
-		&cli.BoolFlag{
-			Name:  "skip-custom-dir",
-			Usage: "Skip custom directory",
-		},
-		&cli.BoolFlag{
-			Name:  "skip-lfs-data",
-			Usage: "Skip LFS data",
-		},
-		&cli.BoolFlag{
-			Name:  "skip-attachment-data",
-			Usage: "Skip attachment data",
-		},
-		&cli.BoolFlag{
-			Name:  "skip-package-data",
-			Usage: "Skip package data",
-		},
-		&cli.BoolFlag{
-			Name:  "skip-index",
-			Usage: "Skip bleve index data",
-		},
-		&cli.BoolFlag{
-			Name:  "skip-db",
-			Usage: "Skip database",
-		},
-		&cli.StringFlag{
-			Name:  "type",
-			Usage: `Dump output format, default to "zip", supported types: ` + strings.Join(dump.SupportedOutputTypes, ", "),
-		},
-	},
+	}
 }
 
 func fatal(format string, args ...any) {
@@ -146,22 +146,18 @@ func runDump(ctx context.Context, cmd *cli.Command) error {
 		return err
 	}
 
-	archiverGeneric, err := archiver.ByExtension("." + outType)
+	dumper, err := dump.NewDumper(ctx, outType, outFile)
 	if err != nil {
-		fatal("Unable to get archiver for extension: %v", err)
+		fatal("Failed to create archive %q: %v", outFile, err)
+		return err
 	}
-
-	archiverWriter := archiverGeneric.(archiver.Writer)
-	if err := archiverWriter.Create(outFile); err != nil {
-		fatal("Creating archiver.Writer failed: %v", err)
-	}
-	defer archiverWriter.Close()
-
-	dumper := &dump.Dumper{
-		Writer:  archiverWriter,
-		Verbose: verbose,
-	}
+	dumper.Verbose = verbose
 	dumper.GlobalExcludeAbsPath(outFileName)
+	defer func() {
+		if err := dumper.Close(); err != nil {
+			fatal("Failed to save archive %q: %v", outFileName, err)
+		}
+	}()
 
 	if cmd.IsSet("skip-repository") && cmd.Bool("skip-repository") {
 		log.Info("Skip dumping local repositories")
@@ -180,7 +176,7 @@ func runDump(ctx context.Context, cmd *cli.Command) error {
 			if err != nil {
 				return err
 			}
-			return dumper.AddReader(object, info, path.Join("data", "lfs", objPath))
+			return dumper.AddFileByReader(object, info, path.Join("data", "lfs", objPath))
 		}); err != nil {
 			fatal("Failed to dump LFS objects: %v", err)
 		}
@@ -218,13 +214,13 @@ func runDump(ctx context.Context, cmd *cli.Command) error {
 			fatal("Failed to dump database: %v", err)
 		}
 
-		if err = dumper.AddFile("gitea-db.sql", dbDump.Name()); err != nil {
+		if err = dumper.AddFileByPath("gitea-db.sql", dbDump.Name()); err != nil {
 			fatal("Failed to include gitea-db.sql: %v", err)
 		}
 	}
 
 	log.Info("Adding custom configuration file from %s", setting.CustomConf)
-	if err = dumper.AddFile("app.ini", setting.CustomConf); err != nil {
+	if err = dumper.AddFileByPath("app.ini", setting.CustomConf); err != nil {
 		fatal("Failed to include specified app.ini: %v", err)
 	}
 
@@ -270,6 +266,7 @@ func runDump(ctx context.Context, cmd *cli.Command) error {
 		excludes = append(excludes, setting.LFS.Storage.Path)
 		excludes = append(excludes, setting.Attachment.Storage.Path)
 		excludes = append(excludes, setting.Packages.Storage.Path)
+		excludes = append(excludes, setting.RepoArchive.Storage.Path)
 		excludes = append(excludes, setting.Log.RootPath)
 		if err := dumper.AddRecursiveExclude("data", setting.AppDataPath, excludes); err != nil {
 			fatal("Failed to include data directory: %v", err)
@@ -283,7 +280,7 @@ func runDump(ctx context.Context, cmd *cli.Command) error {
 		if err != nil {
 			return err
 		}
-		return dumper.AddReader(object, info, path.Join("data", "attachments", objPath))
+		return dumper.AddFileByReader(object, info, path.Join("data", "attachments", objPath))
 	}); err != nil {
 		fatal("Failed to dump attachments: %v", err)
 	}
@@ -297,7 +294,7 @@ func runDump(ctx context.Context, cmd *cli.Command) error {
 		if err != nil {
 			return err
 		}
-		return dumper.AddReader(object, info, path.Join("data", "packages", objPath))
+		return dumper.AddFileByReader(object, info, path.Join("data", "packages", objPath))
 	}); err != nil {
 		fatal("Failed to dump packages: %v", err)
 	}
@@ -322,10 +319,6 @@ func runDump(ctx context.Context, cmd *cli.Command) error {
 	if outFileName == "-" {
 		log.Info("Finish dumping to stdout")
 	} else {
-		if err = archiverWriter.Close(); err != nil {
-			_ = os.Remove(outFileName)
-			fatal("Failed to save %q: %v", outFileName, err)
-		}
 		if err = os.Chmod(outFileName, 0o600); err != nil {
 			log.Info("Can't change file access permissions mask to 0600: %v", err)
 		}

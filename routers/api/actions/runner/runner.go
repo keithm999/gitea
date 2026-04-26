@@ -15,7 +15,6 @@ import (
 	"code.gitea.io/gitea/modules/log"
 	"code.gitea.io/gitea/modules/util"
 	actions_service "code.gitea.io/gitea/services/actions"
-	notify_service "code.gitea.io/gitea/services/notify"
 
 	runnerv1 "code.gitea.io/actions-proto-go/runner/v1"
 	"code.gitea.io/actions-proto-go/runner/v1/runnerv1connect"
@@ -80,9 +79,7 @@ func (s *Service) Register(
 		AgentLabels: labels,
 		Ephemeral:   req.Msg.Ephemeral,
 	}
-	if err := runner.GenerateToken(); err != nil {
-		return nil, errors.New("can't generate token")
-	}
+	runner.GenerateAndFillToken()
 
 	// create new runner
 	if err := actions_model.CreateRunner(ctx, runner); err != nil {
@@ -156,10 +153,16 @@ func (s *Service) FetchTask(
 	}
 
 	if tasksVersion != latestVersion {
+		// Re-load runner from DB so task assignment uses current IsDisabled state
+		// (avoids race where disable commits while this request still has stale runner).
+		freshRunner, err := actions_model.GetRunnerByUUID(ctx, runner.UUID)
+		if err != nil {
+			return nil, status.Errorf(codes.Internal, "get runner: %v", err)
+		}
 		// if the task version in request is not equal to the version in db,
-		// it means there may still be some tasks not be assgined.
+		// it means there may still be some tasks that haven't been assigned.
 		// try to pick a task for the runner that send the request.
-		if t, ok, err := actions_service.PickTask(ctx, runner); err != nil {
+		if t, ok, err := actions_service.PickTask(ctx, freshRunner); err != nil {
 			log.Error("pick task failed: %v", err)
 			return nil, status.Errorf(codes.Internal, "pick task: %v", err)
 		} else if ok {
@@ -217,18 +220,18 @@ func (s *Service) UpdateTask(
 		return nil, status.Errorf(codes.Internal, "load run: %v", err)
 	}
 
-	// don't create commit status for cron job
-	if task.Job.Run.ScheduleID == 0 {
-		actions_service.CreateCommitStatus(ctx, task.Job)
-	}
+	actions_service.CreateCommitStatusForRunJobs(ctx, task.Job.Run, task.Job)
 
 	if task.Status.IsDone() {
-		notify_service.WorkflowJobStatusUpdate(ctx, task.Job.Run.Repo, task.Job.Run.TriggerUser, task.Job, task)
+		actions_service.NotifyWorkflowJobStatusUpdateWithTask(ctx, task.Job, task)
 	}
 
 	if req.Msg.State.Result != runnerv1.Result_RESULT_UNSPECIFIED {
-		if err := actions_service.EmitJobsIfReady(task.Job.RunID); err != nil {
+		if err := actions_service.EmitJobsIfReadyByRun(task.Job.RunID); err != nil {
 			log.Error("Emit ready jobs of run %d: %v", task.Job.RunID, err)
+		}
+		if task.Job.Run.Status.IsDone() {
+			actions_service.NotifyWorkflowRunStatusUpdateWithReload(ctx, task.Job.RepoID, task.Job.RunID)
 		}
 	}
 
@@ -270,7 +273,7 @@ func (s *Service) UpdateLog(
 	rows := req.Msg.Rows[ack-req.Msg.Index:]
 	ns, err := actions.WriteLogs(ctx, task.LogFilename, task.LogSize, rows)
 	if err != nil {
-		return nil, status.Errorf(codes.Internal, "write logs: %v", err)
+		return nil, status.Errorf(codes.Internal, "unable to append logs to dbfs file: %v", err)
 	}
 	task.LogLength += int64(len(rows))
 	for _, n := range ns {

@@ -10,7 +10,6 @@ import (
 	"time"
 
 	auth_model "code.gitea.io/gitea/models/auth"
-	"code.gitea.io/gitea/models/db"
 	issues_model "code.gitea.io/gitea/models/issues"
 	repo_model "code.gitea.io/gitea/models/repo"
 	"code.gitea.io/gitea/models/unittest"
@@ -26,7 +25,7 @@ func TestAPIIssuesReactions(t *testing.T) {
 	defer tests.PrepareTestEnv(t)()
 
 	issue := unittest.AssertExistsAndLoadBean(t, &issues_model.Issue{ID: 1})
-	_ = issue.LoadRepo(db.DefaultContext)
+	_ = issue.LoadRepo(t.Context())
 	owner := unittest.AssertExistsAndLoadBean(t, &user_model.User{ID: issue.Repo.OwnerID})
 
 	session := loginUser(t, owner.Name)
@@ -45,7 +44,7 @@ func TestAPIIssuesReactions(t *testing.T) {
 	req = NewRequestWithJSON(t, "DELETE", urlStr, &api.EditReactionOption{
 		Reaction: "zzz",
 	}).AddTokenAuth(token)
-	MakeRequest(t, req, http.StatusOK)
+	MakeRequest(t, req, http.StatusNoContent)
 
 	// Add allowed reaction
 	req = NewRequestWithJSON(t, "POST", urlStr, &api.EditReactionOption{
@@ -56,7 +55,10 @@ func TestAPIIssuesReactions(t *testing.T) {
 	DecodeJSON(t, resp, &apiNewReaction)
 
 	// Add existing reaction
-	MakeRequest(t, req, http.StatusForbidden)
+	req = NewRequestWithJSON(t, "POST", urlStr, &api.EditReactionOption{
+		Reaction: "rocket",
+	}).AddTokenAuth(token)
+	MakeRequest(t, req, http.StatusOK)
 
 	// Blocked user can't react to comment
 	user34 := unittest.AssertExistsAndLoadBean(t, &user_model.User{ID: 34})
@@ -73,7 +75,7 @@ func TestAPIIssuesReactions(t *testing.T) {
 	DecodeJSON(t, resp, &apiReactions)
 	expectResponse := make(map[int]api.Reaction)
 	expectResponse[0] = api.Reaction{
-		User:     convert.ToUser(db.DefaultContext, user2, user2),
+		User:     convert.ToUser(t.Context(), user2, user2),
 		Reaction: "eyes",
 		Created:  time.Unix(1573248003, 0),
 	}
@@ -90,9 +92,9 @@ func TestAPICommentReactions(t *testing.T) {
 	defer tests.PrepareTestEnv(t)()
 
 	comment := unittest.AssertExistsAndLoadBean(t, &issues_model.Comment{ID: 2})
-	_ = comment.LoadIssue(db.DefaultContext)
+	_ = comment.LoadIssue(t.Context())
 	issue := comment.Issue
-	_ = issue.LoadRepo(db.DefaultContext)
+	_ = issue.LoadRepo(t.Context())
 	owner := unittest.AssertExistsAndLoadBean(t, &user_model.User{ID: issue.Repo.OwnerID})
 
 	session := loginUser(t, owner.Name)
@@ -112,7 +114,7 @@ func TestAPICommentReactions(t *testing.T) {
 	req = NewRequestWithJSON(t, "DELETE", urlStr, &api.EditReactionOption{
 		Reaction: "eyes",
 	}).AddTokenAuth(token)
-	MakeRequest(t, req, http.StatusOK)
+	MakeRequest(t, req, http.StatusNoContent)
 
 	t.Run("UnrelatedCommentID", func(t *testing.T) {
 		// Using the ID of a comment that does not belong to the repository must fail
@@ -143,7 +145,10 @@ func TestAPICommentReactions(t *testing.T) {
 	DecodeJSON(t, resp, &apiNewReaction)
 
 	// Add existing reaction
-	MakeRequest(t, req, http.StatusForbidden)
+	req = NewRequestWithJSON(t, "POST", urlStr, &api.EditReactionOption{
+		Reaction: "+1",
+	}).AddTokenAuth(token)
+	MakeRequest(t, req, http.StatusOK)
 
 	// Get end result of reaction list of issue #1
 	req = NewRequest(t, "GET", urlStr).
@@ -153,12 +158,12 @@ func TestAPICommentReactions(t *testing.T) {
 	DecodeJSON(t, resp, &apiReactions)
 	expectResponse := make(map[int]api.Reaction)
 	expectResponse[0] = api.Reaction{
-		User:     convert.ToUser(db.DefaultContext, user2, user2),
+		User:     convert.ToUser(t.Context(), user2, user2),
 		Reaction: "laugh",
 		Created:  time.Unix(1573248004, 0),
 	}
 	expectResponse[1] = api.Reaction{
-		User:     convert.ToUser(db.DefaultContext, user1, user1),
+		User:     convert.ToUser(t.Context(), user1, user1),
 		Reaction: "laugh",
 		Created:  time.Unix(1573248005, 0),
 	}

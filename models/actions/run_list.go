@@ -7,7 +7,6 @@ import (
 	"context"
 
 	"code.gitea.io/gitea/models/db"
-	repo_model "code.gitea.io/gitea/models/repo"
 	user_model "code.gitea.io/gitea/models/user"
 	"code.gitea.io/gitea/modules/container"
 	"code.gitea.io/gitea/modules/translation"
@@ -22,12 +21,6 @@ type RunList []*ActionRun
 func (runs RunList) GetUserIDs() []int64 {
 	return container.FilterSlice(runs, func(run *ActionRun) (int64, bool) {
 		return run.TriggerUserID, true
-	})
-}
-
-func (runs RunList) GetRepoIDs() []int64 {
-	return container.FilterSlice(runs, func(run *ActionRun) (int64, bool) {
-		return run.RepoID, true
 	})
 }
 
@@ -50,29 +43,18 @@ func (runs RunList) LoadTriggerUser(ctx context.Context) error {
 	return nil
 }
 
-func (runs RunList) LoadRepos(ctx context.Context) error {
-	repoIDs := runs.GetRepoIDs()
-	repos, err := repo_model.GetRepositoriesMapByIDs(ctx, repoIDs)
-	if err != nil {
-		return err
-	}
-	for _, run := range runs {
-		run.Repo = repos[run.RepoID]
-	}
-	return nil
-}
-
 type FindRunOptions struct {
 	db.ListOptions
-	RepoID        int64
-	OwnerID       int64
-	WorkflowID    string
-	Ref           string // the commit/tag/… that caused this workflow
-	TriggerUserID int64
-	TriggerEvent  webhook_module.HookEventType
-	Approved      bool // not util.OptionalBool, it works only when it's true
-	Status        []Status
-	CommitSHA     string
+	RepoID           int64
+	OwnerID          int64
+	WorkflowID       string
+	Ref              string // the commit/tag/… that caused this workflow
+	TriggerUserID    int64
+	TriggerEvent     webhook_module.HookEventType
+	Approved         bool // not util.OptionalBool, it works only when it's true
+	Status           []Status
+	ConcurrencyGroup string
+	CommitSHA        string
 }
 
 func (opts FindRunOptions) ToConds() builder.Cond {

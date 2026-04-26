@@ -8,12 +8,13 @@ import (
 	"crypto/subtle"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	auth_model "code.gitea.io/gitea/models/auth"
 	"code.gitea.io/gitea/models/db"
 	"code.gitea.io/gitea/models/unit"
-	"code.gitea.io/gitea/modules/container"
+	"code.gitea.io/gitea/modules/actions/jobparser"
 	"code.gitea.io/gitea/modules/log"
 	"code.gitea.io/gitea/modules/setting"
 	"code.gitea.io/gitea/modules/timeutil"
@@ -21,7 +22,6 @@ import (
 
 	runnerv1 "code.gitea.io/actions-proto-go/runner/v1"
 	lru "github.com/hashicorp/golang-lru/v2"
-	"github.com/nektos/act/pkg/jobparser"
 	"google.golang.org/protobuf/types/known/timestamppb"
 	"xorm.io/builder"
 )
@@ -77,7 +77,7 @@ func init() {
 }
 
 func (task *ActionTask) Duration() time.Duration {
-	return calculateDuration(task.Started, task.Stopped, task.Status)
+	return calculateDuration(task.Started, task.Stopped, task.Status, task.Updated)
 }
 
 func (task *ActionTask) IsStopped() bool {
@@ -114,7 +114,7 @@ func (task *ActionTask) GetRepoLink() string {
 
 func (task *ActionTask) LoadJob(ctx context.Context) error {
 	if task.Job == nil {
-		job, err := GetRunJobByID(ctx, task.JobID)
+		job, err := GetRunJobByRepoAndID(ctx, task.RepoID, task.JobID)
 		if err != nil {
 			return err
 		}
@@ -147,9 +147,8 @@ func (task *ActionTask) LoadAttributes(ctx context.Context) error {
 	return nil
 }
 
-func (task *ActionTask) GenerateToken() (err error) {
-	task.Token, task.TokenSalt, task.TokenHash, task.TokenLastEight, err = generateSaltedToken()
-	return err
+func (task *ActionTask) GenerateAndFillToken() {
+	task.Token, task.TokenSalt, task.TokenHash, task.TokenLastEight = generateSaltedToken()
 }
 
 func GetTaskByID(ctx context.Context, id int64) (*ActionTask, error) {
@@ -216,6 +215,20 @@ func GetRunningTaskByToken(ctx context.Context, token string) (*ActionTask, erro
 	return nil, errNotExist
 }
 
+func makeTaskStepDisplayName(step *jobparser.Step, limit int) (name string) {
+	if step.Name != "" {
+		name = step.Name // the step has an explicit name
+	} else {
+		// for unnamed step, its "String()" method tries to get a display name by its "name", "uses",
+		// "run" or "id" (last fallback), we add the "Run " prefix for unnamed steps for better display
+		// for multi-line "run" scripts, only use the first line to match GitHub's behavior
+		// https://github.com/actions/runner/blob/66800900843747f37591b077091dd2c8cf2c1796/src/Runner.Worker/Handlers/ScriptHandler.cs#L45-L58
+		runStr, _, _ := strings.Cut(strings.TrimSpace(step.Run), "\n")
+		name = "Run " + util.IfZero(strings.TrimSpace(runStr), step.String())
+	}
+	return util.EllipsisDisplayString(name, limit) // database column has a length limit
+}
+
 func CreateTaskForRunner(ctx context.Context, runner *ActionRunner) (*ActionTask, bool, error) {
 	ctx, committer, err := db.TxContext(ctx)
 	if err != nil {
@@ -246,7 +259,7 @@ func CreateTaskForRunner(ctx context.Context, runner *ActionRunner) (*ActionTask
 	var job *ActionRunJob
 	log.Trace("runner labels: %v", runner.AgentLabels)
 	for _, v := range jobs {
-		if isSubset(runner.AgentLabels, v.RunsOn) {
+		if runner.CanMatchLabels(v.RunsOn) {
 			job = v
 			break
 		}
@@ -259,7 +272,6 @@ func CreateTaskForRunner(ctx context.Context, runner *ActionRunner) (*ActionTask
 	}
 
 	now := timeutil.TimeStampNow()
-	job.Attempt++
 	job.Started = now
 	job.Status = StatusRunning
 
@@ -274,17 +286,12 @@ func CreateTaskForRunner(ctx context.Context, runner *ActionRunner) (*ActionTask
 		CommitSHA:         job.CommitSHA,
 		IsForkPullRequest: job.IsForkPullRequest,
 	}
-	if err := task.GenerateToken(); err != nil {
-		return nil, false, err
-	}
+	task.GenerateAndFillToken()
 
-	parsedWorkflows, err := jobparser.Parse(job.WorkflowPayload)
+	workflowJob, err := job.ParseJob()
 	if err != nil {
-		return nil, false, fmt.Errorf("parse workflow of job %d: %w", job.ID, err)
-	} else if len(parsedWorkflows) != 1 {
-		return nil, false, fmt.Errorf("workflow of job %d: not single workflow", job.ID)
+		return nil, false, fmt.Errorf("load job %d: %w", job.ID, err)
 	}
-	_, workflowJob := parsedWorkflows[0].Job()
 
 	if _, err := e.Insert(task); err != nil {
 		return nil, false, err
@@ -298,9 +305,8 @@ func CreateTaskForRunner(ctx context.Context, runner *ActionRunner) (*ActionTask
 	if len(workflowJob.Steps) > 0 {
 		steps := make([]*ActionTaskStep, len(workflowJob.Steps))
 		for i, v := range workflowJob.Steps {
-			name := util.EllipsisDisplayString(v.String(), 255)
 			steps[i] = &ActionTaskStep{
-				Name:   name,
+				Name:   makeTaskStepDisplayName(v, 255),
 				TaskID: task.ID,
 				Index:  int64(i),
 				RepoID: task.RepoID,
@@ -378,6 +384,7 @@ func UpdateTaskByState(ctx context.Context, runnerID int64, state *runnerv1.Task
 			}
 			if _, err := UpdateRunJob(ctx, &ActionRunJob{
 				ID:      task.JobID,
+				RepoID:  task.RepoID,
 				Status:  task.Status,
 				Stopped: task.Stopped,
 			}, nil); err != nil {
@@ -439,6 +446,7 @@ func StopTask(ctx context.Context, taskID int64, status Status) error {
 	task.Stopped = now
 	if _, err := UpdateRunJob(ctx, &ActionRunJob{
 		ID:      task.JobID,
+		RepoID:  task.RepoID,
 		Status:  task.Status,
 		Stopped: task.Stopped,
 	}, nil); err != nil {
@@ -477,20 +485,6 @@ func FindOldTasksToExpire(ctx context.Context, olderThan timeutil.TimeStamp, lim
 	return tasks, e.Where("stopped > 0 AND stopped < ? AND log_expired = ?", olderThan, false).
 		Limit(limit).
 		Find(&tasks)
-}
-
-func isSubset(set, subset []string) bool {
-	m := make(container.Set[string], len(set))
-	for _, v := range set {
-		m.Add(v)
-	}
-
-	for _, v := range subset {
-		if !m.Contains(v) {
-			return false
-		}
-	}
-	return true
 }
 
 func convertTimestamp(timestamp *timestamppb.Timestamp) timeutil.TimeStamp {

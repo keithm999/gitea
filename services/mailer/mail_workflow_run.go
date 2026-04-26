@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"time"
 
 	actions_model "code.gitea.io/gitea/models/actions"
 	repo_model "code.gitea.io/gitea/models/repo"
@@ -15,18 +16,20 @@ import (
 	"code.gitea.io/gitea/modules/base"
 	"code.gitea.io/gitea/modules/log"
 	"code.gitea.io/gitea/modules/setting"
+	"code.gitea.io/gitea/modules/templates"
 	"code.gitea.io/gitea/modules/translation"
 	"code.gitea.io/gitea/services/convert"
 	sender_service "code.gitea.io/gitea/services/mailer/sender"
 )
 
-const tplWorkflowRun = "notify/workflow_run"
+const tplWorkflowRun templates.TplName = "repo/actions/workflow_run"
 
 type convertedWorkflowJob struct {
-	HTMLURL string
-	Status  actions_model.Status
-	Name    string
-	Attempt int64
+	HTMLURL  string
+	Name     string
+	Status   actions_model.Status
+	Attempt  int64
+	Duration time.Duration
 }
 
 func generateMessageIDForActionsWorkflowRunStatusEmail(repo *repo_model.Repository, run *actions_model.ActionRun) string {
@@ -34,7 +37,7 @@ func generateMessageIDForActionsWorkflowRunStatusEmail(repo *repo_model.Reposito
 }
 
 func composeAndSendActionsWorkflowRunStatusEmail(ctx context.Context, repo *repo_model.Repository, run *actions_model.ActionRun, sender *user_model.User, recipients []*user_model.User) error {
-	jobs, err := actions_model.GetRunJobsByRunID(ctx, run.ID)
+	jobs, err := actions_model.GetLatestAttemptJobsByRepoAndRunID(ctx, repo.ID, run.ID)
 	if err != nil {
 		return err
 	}
@@ -45,16 +48,15 @@ func composeAndSendActionsWorkflowRunStatusEmail(ctx context.Context, repo *repo
 		}
 	}
 
-	subject := "Run"
+	var subjectTrString string
 	switch run.Status {
 	case actions_model.StatusFailure:
-		subject += " failed"
+		subjectTrString = "mail.repo.actions.run.failed"
 	case actions_model.StatusCancelled:
-		subject += " cancelled"
+		subjectTrString = "mail.repo.actions.run.cancelled"
 	case actions_model.StatusSuccess:
-		subject += " succeeded"
+		subjectTrString = "mail.repo.actions.run.succeeded"
 	}
-	subject = fmt.Sprintf("%s: %s (%s)", subject, run.WorkflowID, base.ShortSha(run.CommitSHA))
 	displayName := fromDisplayName(sender)
 	messageID := generateMessageIDForActionsWorkflowRunStatusEmail(repo, run)
 	metadataHeaders := generateMetadataHeaders(repo)
@@ -80,10 +82,11 @@ func composeAndSendActionsWorkflowRunStatusEmail(ctx context.Context, repo *repo
 			continue
 		}
 		convertedJobs = append(convertedJobs, convertedWorkflowJob{
-			HTMLURL: converted0.HTMLURL,
-			Name:    converted0.Name,
-			Status:  job.Status,
-			Attempt: converted0.RunAttempt,
+			HTMLURL:  converted0.HTMLURL,
+			Name:     converted0.Name,
+			Status:   job.Status,
+			Attempt:  converted0.RunAttempt,
+			Duration: job.Duration(),
 		})
 	}
 
@@ -93,27 +96,28 @@ func composeAndSendActionsWorkflowRunStatusEmail(ctx context.Context, repo *repo
 	}
 	for lang, tos := range langMap {
 		locale := translation.NewLocale(lang)
-		var runStatusText string
+		var runStatusTrString string
 		switch run.Status {
 		case actions_model.StatusSuccess:
-			runStatusText = "All jobs have succeeded"
+			runStatusTrString = "mail.repo.actions.jobs.all_succeeded"
 		case actions_model.StatusFailure:
-			runStatusText = "All jobs have failed"
+			runStatusTrString = "mail.repo.actions.jobs.all_failed"
 			for _, job := range jobs {
 				if !job.Status.IsFailure() {
-					runStatusText = "Some jobs were not successful"
+					runStatusTrString = "mail.repo.actions.jobs.some_not_successful"
 					break
 				}
 			}
 		case actions_model.StatusCancelled:
-			runStatusText = "All jobs have been cancelled"
+			runStatusTrString = "mail.repo.actions.jobs.all_cancelled"
 		}
+		subject := fmt.Sprintf("%s: %s (%s)", locale.TrString(subjectTrString), run.WorkflowID, base.ShortSha(run.CommitSHA))
 		var mailBody bytes.Buffer
-		if err := LoadedTemplates().BodyTemplates.ExecuteTemplate(&mailBody, tplWorkflowRun, map[string]any{
+		if err := LoadedTemplates().BodyTemplates.ExecuteTemplate(&mailBody, string(tplWorkflowRun), map[string]any{
 			"Subject":       subject,
 			"Repo":          repo,
 			"Run":           run,
-			"RunStatusText": runStatusText,
+			"RunStatusText": locale.TrString(runStatusTrString),
 			"Jobs":          convertedJobs,
 			"locale":        locale,
 		}); err != nil {
@@ -145,30 +149,31 @@ func composeAndSendActionsWorkflowRunStatusEmail(ctx context.Context, repo *repo
 	return nil
 }
 
-func MailActionsTrigger(ctx context.Context, sender *user_model.User, repo *repo_model.Repository, run *actions_model.ActionRun) error {
+func MailActionsTrigger(ctx context.Context, recipient *user_model.User, repo *repo_model.Repository, run *actions_model.ActionRun) error {
 	if setting.MailService == nil {
 		return nil
 	}
 	if !run.Status.IsDone() || run.Status.IsSkipped() {
 		return nil
 	}
-
-	recipients := make([]*user_model.User, 0)
-
-	if !sender.IsGiteaActions() && !sender.IsGhost() && sender.IsMailable() {
-		notifyPref, err := user_model.GetUserSetting(ctx, sender.ID,
-			user_model.SettingsKeyEmailNotificationGiteaActions, user_model.SettingEmailNotificationGiteaActionsFailureOnly)
-		if err != nil {
-			return err
-		}
-		if notifyPref == user_model.SettingEmailNotificationGiteaActionsAll || !run.Status.IsSuccess() && notifyPref != user_model.SettingEmailNotificationGiteaActionsDisabled {
-			recipients = append(recipients, sender)
-		}
+	if !recipient.IsMailable() {
+		return nil
 	}
 
-	if len(recipients) > 0 {
-		log.Debug("MailActionsTrigger: Initiate email composition")
-		return composeAndSendActionsWorkflowRunStatusEmail(ctx, repo, run, sender, recipients)
+	notifyPref, err := user_model.GetUserSetting(ctx, recipient.ID,
+		user_model.SettingsKeyEmailNotificationGiteaActions, user_model.SettingEmailNotificationGiteaActionsFailureOnly)
+	if err != nil {
+		return err
 	}
-	return nil
+	// "disabled" never sends
+	if notifyPref == user_model.SettingEmailNotificationGiteaActionsDisabled {
+		return nil
+	}
+	// "failure-only" skips non-failure runs
+	if notifyPref != user_model.SettingEmailNotificationGiteaActionsAll && !run.Status.IsFailure() {
+		return nil
+	}
+
+	log.Debug("MailActionsTrigger: Initiate email composition")
+	return composeAndSendActionsWorkflowRunStatusEmail(ctx, repo, run, recipient, []*user_model.User{recipient})
 }

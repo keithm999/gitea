@@ -52,39 +52,34 @@ func deleteOrganization(ctx context.Context, org *org_model.Organization) error 
 
 // DeleteOrganization completely and permanently deletes everything of organization.
 func DeleteOrganization(ctx context.Context, org *org_model.Organization, purge bool) error {
-	ctx, committer, err := db.TxContext(ctx)
-	if err != nil {
-		return err
-	}
-	defer committer.Close()
-
-	if purge {
-		err := repo_service.DeleteOwnerRepositoriesDirectly(ctx, org.AsUser())
-		if err != nil {
-			return err
+	if err := db.WithTx(ctx, func(ctx context.Context) error {
+		if purge {
+			err := repo_service.DeleteOwnerRepositoriesDirectly(ctx, org.AsUser())
+			if err != nil {
+				return err
+			}
 		}
-	}
 
-	// Check ownership of repository.
-	count, err := repo_model.CountRepositories(ctx, repo_model.CountRepositoryOptions{OwnerID: org.ID})
-	if err != nil {
-		return fmt.Errorf("GetRepositoryCount: %w", err)
-	} else if count > 0 {
-		return repo_model.ErrUserOwnRepos{UID: org.ID}
-	}
+		// Check ownership of repository.
+		count, err := repo_model.CountRepositories(ctx, repo_model.CountRepositoryOptions{OwnerID: org.ID})
+		if err != nil {
+			return fmt.Errorf("GetRepositoryCount: %w", err)
+		} else if count > 0 {
+			return repo_model.ErrUserOwnRepos{UID: org.ID}
+		}
 
-	// Check ownership of packages.
-	if ownsPackages, err := packages_model.HasOwnerPackages(ctx, org.ID); err != nil {
-		return fmt.Errorf("HasOwnerPackages: %w", err)
-	} else if ownsPackages {
-		return packages_model.ErrUserOwnPackages{UID: org.ID}
-	}
+		// Check ownership of packages.
+		if ownsPackages, err := packages_model.HasOwnerPackages(ctx, org.ID); err != nil {
+			return fmt.Errorf("HasOwnerPackages: %w", err)
+		} else if ownsPackages {
+			return packages_model.ErrUserOwnPackages{UID: org.ID}
+		}
 
-	if err := deleteOrganization(ctx, org); err != nil {
-		return fmt.Errorf("DeleteOrganization: %w", err)
-	}
-
-	if err := committer.Commit(); err != nil {
+		if err := deleteOrganization(ctx, org); err != nil {
+			return fmt.Errorf("DeleteOrganization: %w", err)
+		}
+		return nil
+	}); err != nil {
 		return err
 	}
 
@@ -107,10 +102,14 @@ func DeleteOrganization(ctx context.Context, org *org_model.Organization, purge 
 	return nil
 }
 
-func updateOrgRepoForVisibilityChanged(ctx context.Context, repo *repo_model.Repository, makePrivate bool) error {
+func updateRepoForVisibilityChanged(ctx context.Context, repo *repo_model.Repository, makePrivate bool) error {
+	if err := repo.LoadOwner(ctx); err != nil {
+		return fmt.Errorf("LoadOwner: %w", err)
+	}
+
 	// Organization repository need to recalculate access table when visibility is changed.
-	if err := access_model.RecalculateTeamAccesses(ctx, repo, 0); err != nil {
-		return fmt.Errorf("recalculateTeamAccesses: %w", err)
+	if err := access_model.RecalculateAccesses(ctx, repo); err != nil {
+		return fmt.Errorf("RecalculateAccesses: %w", err)
 	}
 
 	if makePrivate {
@@ -140,7 +139,7 @@ func updateOrgRepoForVisibilityChanged(ctx context.Context, repo *repo_model.Rep
 		return fmt.Errorf("getRepositoriesByForkID: %w", err)
 	}
 	for i := range forkRepos {
-		if err := updateOrgRepoForVisibilityChanged(ctx, forkRepos[i], makePrivate); err != nil {
+		if err := updateRepoForVisibilityChanged(ctx, forkRepos[i], makePrivate); err != nil {
 			return fmt.Errorf("updateRepoForVisibilityChanged[%s]: %w", forkRepos[i].FullName(), err)
 		}
 	}
@@ -166,10 +165,27 @@ func ChangeOrganizationVisibility(ctx context.Context, org *org_model.Organizati
 			return err
 		}
 		for _, repo := range repos {
-			if err := updateOrgRepoForVisibilityChanged(ctx, repo, visibility == structs.VisibleTypePrivate); err != nil {
-				return fmt.Errorf("updateOrgRepoForVisibilityChanged: %w", err)
+			if err := updateRepoForVisibilityChanged(ctx, repo, visibility == structs.VisibleTypePrivate); err != nil {
+				return fmt.Errorf("updateRepoForVisibilityChanged: %w", err)
 			}
 		}
 		return nil
 	})
+}
+
+// UpdateOrgEmailAddress validates and updates the organization's contact email.
+// A nil email means no change.
+func UpdateOrgEmailAddress(ctx context.Context, org *org_model.Organization, email *string) error {
+	if email == nil {
+		return nil
+	}
+
+	if *email != "" {
+		if err := user_model.ValidateEmail(*email); err != nil {
+			return err
+		}
+	}
+
+	org.Email = *email
+	return user_model.UpdateUserCols(ctx, org.AsUser(), "email")
 }

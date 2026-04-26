@@ -72,7 +72,7 @@ func CreateCodeComment(ctx *context.Context) {
 	}
 
 	if ctx.HasError() {
-		ctx.Flash.Error(ctx.Data["ErrorMsg"].(string))
+		ctx.Flash.Error(ctx.GetErrMsg())
 		ctx.Redirect(fmt.Sprintf("%s/pulls/%d/files", ctx.Repo.RepoLink, issue.Index))
 		return
 	}
@@ -230,7 +230,7 @@ func SubmitReview(ctx *context.Context) {
 		return
 	}
 	if ctx.HasError() {
-		ctx.Flash.Error(ctx.Data["ErrorMsg"].(string))
+		ctx.Flash.Error(ctx.GetErrMsg())
 		ctx.JSONRedirect(fmt.Sprintf("%s/pulls/%d/files", ctx.Repo.RepoLink, issue.Index))
 		return
 	}
@@ -331,7 +331,7 @@ func UpdateViewedFiles(ctx *context.Context) {
 		updatedFiles[file] = state
 	}
 
-	if err := pull_model.UpdateReviewState(ctx, ctx.Doer.ID, pull.ID, data.HeadCommitSHA, updatedFiles); err != nil {
+	if _, err := pull_model.UpdateReviewState(ctx, ctx.Doer.ID, pull.ID, data.HeadCommitSHA, updatedFiles); err != nil {
 		ctx.ServerError("UpdateReview", err)
 	}
 }

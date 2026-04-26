@@ -10,7 +10,6 @@ import (
 	"strings"
 	"testing"
 
-	"code.gitea.io/gitea/models/db"
 	"code.gitea.io/gitea/models/unittest"
 	user_model "code.gitea.io/gitea/models/user"
 	"code.gitea.io/gitea/modules/test"
@@ -128,7 +127,7 @@ func TestCompareBranches(t *testing.T) {
 func TestCompareCodeExpand(t *testing.T) {
 	onGiteaRun(t, func(t *testing.T, u *url.URL) {
 		user1 := unittest.AssertExistsAndLoadBean(t, &user_model.User{ID: 1})
-		repo, err := repo_service.CreateRepositoryDirectly(db.DefaultContext, user1, user1, repo_service.CreateRepoOptions{
+		repo, err := repo_service.CreateRepositoryDirectly(t.Context(), user1, user1, repo_service.CreateRepoOptions{
 			Name:          "test_blob_excerpt",
 			Readme:        "Default",
 			AutoInit:      true,
@@ -148,12 +147,12 @@ func TestCompareCodeExpand(t *testing.T) {
 		req := NewRequest(t, "GET", "/user1/test_blob_excerpt/compare/main...user2/test_blob_excerpt-fork:forked-branch")
 		resp := session.MakeRequest(t, req, http.StatusOK)
 		htmlDoc := NewHTMLParser(t, resp.Body)
-		els := htmlDoc.Find(`button.code-expander-button[hx-get]`)
+		els := htmlDoc.Find(`button.code-expander-button[data-fetch-url]`)
 
 		// all the links in the comparison should be to the forked repo&branch
 		assert.NotZero(t, els.Length())
 		for i := 0; i < els.Length(); i++ {
-			link := els.Eq(i).AttrOr("hx-get", "")
+			link := els.Eq(i).AttrOr("data-fetch-url", "")
 			assert.True(t, strings.HasPrefix(link, "/user2/test_blob_excerpt-fork/blob_excerpt/"))
 		}
 	})
