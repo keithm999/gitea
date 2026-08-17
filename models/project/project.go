@@ -205,13 +205,13 @@ func IsTypeValid(p Type) bool {
 // SearchOptions are options for GetProjects
 type SearchOptions struct {
 	db.ListOptions
-	OwnerID  int64
-	RepoID   int64
+	OwnerID   int64
+	RepoID    int64
 	CreatorID int64
-	IsClosed optional.Option[bool]
-	OrderBy  db.SearchOrderBy
-	Type     Type
-	Title    string
+	IsClosed  optional.Option[bool]
+	OrderBy   db.SearchOrderBy
+	Type      Type
+	Title     string
 }
 
 func (opts SearchOptions) ToConds() builder.Cond {

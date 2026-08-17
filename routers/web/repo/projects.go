@@ -80,6 +80,7 @@ func Projects(ctx *context.Context) {
 			PageSize: setting.UI.IssuePagingNum,
 			Page:     page,
 		},
+		RepoID:   repo.ID,
 		IsClosed: optional.Some(isShowClosed),
 		OrderBy:  project_model.GetSearchOrderByBySortType(sortType),
 		Type:     project_model.TypeRepository,

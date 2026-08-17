@@ -139,7 +139,7 @@ func retrieveProjectsInternal(ctx *context.Context, repo *repo_model.Repository)
 	openProjects = append(openProjects, thisRepoProjects...)
 
 	// Get open Projects for all Org-levels created by the current user
-  thisOrgProjects, err := db.Find[project_model.Project](ctx, project_model.SearchOptions{
+	thisOrgProjects, err := db.Find[project_model.Project](ctx, project_model.SearchOptions{
 		ListOptions: db.ListOptionsAll,
 		IsClosed:    optional.Some(false),
 		Type:        project_model.TypeOrganization,
@@ -152,7 +152,7 @@ func retrieveProjectsInternal(ctx *context.Context, repo *repo_model.Repository)
 	openProjects = append(openProjects, thisOrgProjects...)
 
 	// Get open Projects for individuals created by the current user
-  thisIndividualProjects, err := db.Find[project_model.Project](ctx, project_model.SearchOptions{
+	thisIndividualProjects, err := db.Find[project_model.Project](ctx, project_model.SearchOptions{
 		ListOptions: db.ListOptionsAll,
 		IsClosed:    optional.Some(false),
 		Type:        project_model.TypeIndividual,
@@ -179,7 +179,7 @@ func retrieveProjectsInternal(ctx *context.Context, repo *repo_model.Repository)
 	closedProjects = append(closedProjects, thisRepoClosedProjects...)
 
 	// Get open Projects for all Org-levels created by the current user
-  thisOrgClosedProjects, err := db.Find[project_model.Project](ctx, project_model.SearchOptions{
+	thisOrgClosedProjects, err := db.Find[project_model.Project](ctx, project_model.SearchOptions{
 		ListOptions: db.ListOptionsAll,
 		IsClosed:    optional.Some(true),
 		Type:        project_model.TypeOrganization,
@@ -192,7 +192,7 @@ func retrieveProjectsInternal(ctx *context.Context, repo *repo_model.Repository)
 	closedProjects = append(closedProjects, thisOrgClosedProjects...)
 
 	// Get open Projects for individuals created by the current user
-  thisIndividualClosedProjects, err := db.Find[project_model.Project](ctx, project_model.SearchOptions{
+	thisIndividualClosedProjects, err := db.Find[project_model.Project](ctx, project_model.SearchOptions{
 		ListOptions: db.ListOptionsAll,
 		IsClosed:    optional.Some(true),
 		Type:        project_model.TypeIndividual,
@@ -203,7 +203,6 @@ func retrieveProjectsInternal(ctx *context.Context, repo *repo_model.Repository)
 		return nil, nil
 	}
 	closedProjects = append(closedProjects, thisIndividualClosedProjects...)
-
 
 	return openProjects, closedProjects
 }

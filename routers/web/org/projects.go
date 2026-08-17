@@ -68,22 +68,22 @@ func Projects(ctx *context.Context) {
 	var projects []*project_model.Project
 
 	// if is_individual {
-		allUserProjects, total, err := db.FindAndCount[project_model.Project](ctx, project_model.SearchOptions{
-			ListOptions: db.ListOptions{
-				Page:     page,
-				PageSize: setting.UI.IssuePagingNum,
-			},
-			CreatorID: ctx.Doer.ID,
-			IsClosed: optional.Some(isShowClosed),
-			OrderBy:  project_model.GetSearchOrderByBySortType(sortType),
-			Title: keyword,
-		})
-		if err != nil {
-			ctx.ServerError("FindProjects", err)
-			return
-		}
+	allUserProjects, total, err := db.FindAndCount[project_model.Project](ctx, project_model.SearchOptions{
+		ListOptions: db.ListOptions{
+			Page:     page,
+			PageSize: setting.UI.IssuePagingNum,
+		},
+		CreatorID: ctx.Doer.ID,
+		IsClosed:  optional.Some(isShowClosed),
+		OrderBy:   project_model.GetSearchOrderByBySortType(sortType),
+		Title:     keyword,
+	})
+	if err != nil {
+		ctx.ServerError("FindProjects", err)
+		return
+	}
 
-		projects = append(projects, allUserProjects...)
+	projects = append(projects, allUserProjects...)
 
 	// }
 
@@ -122,7 +122,6 @@ func Projects(ctx *context.Context) {
 
 	// projects = append(projects, repoProjects...)
 
-
 	if err := project_service.LoadIssueNumbersForProjects(ctx, projects, ctx.Doer); err != nil {
 		ctx.ServerError("LoadIssueNumbersForProjects", err)
 		return
@@ -138,7 +137,6 @@ func Projects(ctx *context.Context) {
 		return
 	}
 
-
 	if isShowClosed {
 		ctx.Data["OpenCount"] = opTotal
 		ctx.Data["ClosedCount"] = total
@@ -146,7 +144,6 @@ func Projects(ctx *context.Context) {
 		ctx.Data["OpenCount"] = total
 		ctx.Data["ClosedCount"] = opTotal
 	}
-
 
 	ctx.Data["Projects"] = projects
 
